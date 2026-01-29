@@ -11,6 +11,7 @@ class ParticleState:
         self.flow_weight = self.config.get("flow_weight", 1.0)
         self.regime_weight = self.config.get("regime_weight", 1.0)
         self.barrier_weight = self.config.get("barrier_weight", 1.0)
+        self.flow_span = self.config.get("flow_span", 10)  # EWM span for flow momentum
 
     def compute_state(self, features_df: pd.DataFrame) -> pd.DataFrame:
         """Compute particle state features."""
@@ -18,7 +19,7 @@ class ParticleState:
 
         # Flow momentum (weighted cumulative OFI)
         df["flow_momentum"] = df.groupby("symbol")["ofi"].transform(
-            lambda x: x.ewm(span=10).mean()
+            lambda x: x.ewm(span=self.flow_span).mean()
         ) * self.flow_weight
 
         # Regime stability (how consistent the K label has been)

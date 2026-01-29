@@ -30,6 +30,7 @@ from gnosis.harness import (
     compute_stability_metrics,
 )
 from gnosis.registry import FeatureRegistry
+from gnosis.loop import RalphLoop, RalphLoopConfig
 
 
 def get_git_commit() -> str:
@@ -94,8 +95,13 @@ def get_confidence_floor(regimes_config: dict, s_label: str) -> float:
     """Get confidence floor for a species label from config."""
     constraints = regimes_config.get("constraints_by_species", {})
     if s_label in constraints:
-        return constraints[s_label].get("confidence_floor", 0.65)
-    return constraints.get("default", {}).get("confidence_floor", 0.65)
+        base_floor = constraints[s_label].get("confidence_floor", 0.65)
+    else:
+        base_floor = constraints.get("default", {}).get("confidence_floor", 0.65)
+
+    # Apply scaling if specified (from Ralph Loop)
+    scale = regimes_config.get("confidence_floor_scale", 1.0)
+    return base_floor * scale
 
 
 def apply_abstain_logic(
@@ -152,7 +158,7 @@ def apply_abstain_logic(
     return result
 
 
-def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -> dict:
+def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", hparams_config: dict = None) -> dict:
     """Run the full experiment pipeline."""
     started_at = datetime.now(timezone.utc)
     np.random.seed(config.get("random_seed", 1337))
@@ -199,7 +205,42 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -
     print("Computing targets...")
     features_df = compute_future_returns(features_df, horizon_bars=10)
 
-    # 8. Walk-forward validation with calibration
+    # 8. Ralph Loop (optional): nested hyperparameter selection
+    ralph_results = None
+    selected_hparams_per_fold = {}
+    if hparams_config is not None:
+        print("Running Ralph Loop for hyperparameter selection...")
+        ralph_loop_config = RalphLoopConfig.from_yaml(hparams_config)
+        ralph = RalphLoop(
+            loop_config=ralph_loop_config,
+            base_config=config,
+            random_seed=config.get("random_seed", 1337),
+        )
+
+        wf_config = config.get("walkforward", {})
+        harness_for_ralph = WalkForwardHarness(wf_config)
+
+        trials_df, selected_json = ralph.run(
+            features_df=features_df,
+            outer_harness=harness_for_ralph,
+            regimes_config=regimes_config,
+        )
+        robustness = ralph.get_robustness_stats(trials_df)
+
+        ralph_results = {
+            "trials_df": trials_df,
+            "selected_json": selected_json,
+            "robustness": robustness,
+        }
+
+        # Build selected params lookup by fold
+        for fold_str, fold_data in selected_json.get("per_fold", {}).items():
+            selected_hparams_per_fold[int(fold_str)] = fold_data.get("params", {})
+
+        print(f"  Ralph Loop: {len(ralph.candidates)} candidates evaluated")
+        print(f"  Global best: {selected_json.get('global_best', {})}")
+
+    # 9. Walk-forward validation with calibration
     print("Running walk-forward validation with calibration...")
     wf_config = config.get("walkforward", {})
     harness = WalkForwardHarness(wf_config)
@@ -220,9 +261,24 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -
         if len(train_df) < 10 or len(test_df) < 5:
             continue
 
+        # Apply fold-specific hyperparameters if Ralph Loop was run
+        fold_models_config = models_config.copy()
+        fold_regimes_config = regimes_config.copy()
+        if fold.fold_idx in selected_hparams_per_fold:
+            fold_params = selected_hparams_per_fold[fold.fold_idx]
+            if "predictor_l2_reg" in fold_params:
+                if "predictor" not in fold_models_config:
+                    fold_models_config["predictor"] = {}
+                fold_models_config["predictor"]["l2_reg"] = fold_params["predictor_l2_reg"]
+            if "confidence_floor_scale" in fold_params:
+                fold_regimes_config["confidence_floor_scale"] = fold_params["confidence_floor_scale"]
+
+        # Create fold-specific predictor
+        fold_predictor = QuantilePredictor(fold_models_config)
+
         # Fit and predict
-        predictor.fit(train_df, "future_return")
-        preds = predictor.predict(test_df)
+        fold_predictor.fit(train_df, "future_return")
+        preds = fold_predictor.predict(test_df)
         preds["fold"] = fold.fold_idx
 
         baseline_preds = baseline.predict(test_df)
@@ -263,7 +319,7 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -
         })
 
         # Apply abstain logic
-        preds = apply_abstain_logic(preds, test_df, regimes_config)
+        preds = apply_abstain_logic(preds, test_df, fold_regimes_config)
 
         # Add KPCOFGS columns to predictions
         kpcofgs_cols = ["K_label", "P_label", "C_label", "O_label", "F_label", "G_label", "S_label",
@@ -324,7 +380,7 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -
         predictions_df = pd.DataFrame()
         baseline_df = pd.DataFrame()
 
-    # 9. Compute aggregate metrics
+    # 10. Compute aggregate metrics
     print("Computing aggregate metrics...")
     if fold_results:
         avg_coverage = np.mean([f["model_coverage_90"] for f in fold_results if not np.isnan(f["model_coverage_90"])])
@@ -339,11 +395,11 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -
         avg_mae = 0.01
         avg_abstention_rate = 0.0
 
-    # 10. Compute stability metrics
+    # 11. Compute stability metrics
     print("Computing stability metrics...")
     stability_metrics = compute_stability_metrics(features_df)
 
-    # 11. Compute calibration summary
+    # 12. Compute calibration summary
     print("Computing calibration diagnostics...")
     if calibration_data:
         avg_ece_raw = np.mean([c["ece_raw"] for c in calibration_data])
@@ -362,12 +418,27 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -
             "fold_calibration": [],
         }
 
-    # 12. Create feature registry
+    # 13. Create feature registry
     print("Creating feature registry...")
     registry = FeatureRegistry.create_default()
     registry.save(out_dir / "feature_registry.json")
 
-    # 13. Save artifacts
+    # 14. Save Ralph Loop artifacts (if run)
+    if ralph_results is not None:
+        print("Saving Ralph Loop artifacts...")
+        trials_df = ralph_results["trials_df"]
+        selected_json = ralph_results["selected_json"]
+        robustness = ralph_results["robustness"]
+
+        # hparams_trials.parquet
+        if not trials_df.empty:
+            trials_df.to_parquet(out_dir / "hparams_trials.parquet", index=False)
+
+        # selected_hparams.json
+        with open(out_dir / "selected_hparams.json", "w") as f:
+            json.dump(selected_json, f, indent=2)
+
+    # 15. Save artifacts
     print("Saving artifacts...")
 
     # predictions.parquet - ensure all required columns
@@ -457,6 +528,17 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -
         "calibration": calibration_summary,
         "fold_results": fold_results,
     }
+
+    # Add Ralph Loop results if available
+    if ralph_results is not None:
+        report["ralph_loop"] = {
+            "enabled": True,
+            "n_candidates": len(ralph_results["trials_df"]["candidate_id"].unique()) if not ralph_results["trials_df"].empty else 0,
+            "selected_params": ralph_results["selected_json"],
+            "robustness": ralph_results["robustness"],
+        }
+    else:
+        report["ralph_loop"] = {"enabled": False}
     # Compute report_hash and add it to report
     report_hash = compute_report_hash(report)
     report["report_hash"] = report_hash
@@ -529,6 +611,33 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -
     for fr in fold_results:
         report_md += f"| {fr['fold']} | {fr['n_train']} | {fr['n_test']} | {fr['model_coverage_90']:.4f} | {fr['model_sharpness']:.6f} | {fr['model_mae']:.6f} | {fr['abstention_rate']:.4f} |\n"
 
+    # Add Ralph Loop section if enabled
+    if ralph_results is not None:
+        selected = ralph_results["selected_json"]
+        robustness = ralph_results["robustness"]
+
+        report_md += "\n## Ralph Loop (Hyperparameter Selection)\n"
+        report_md += f"- **Enabled**: Yes\n"
+        report_md += f"- **Candidates Evaluated**: {len(ralph_results['trials_df']['candidate_id'].unique()) if not ralph_results['trials_df'].empty else 0}\n"
+
+        if selected.get("global_best"):
+            gb = selected["global_best"]
+            report_md += f"- **Global Best Candidate**: {gb.get('candidate_id', 'N/A')}\n"
+            report_md += f"- **Global Best Params**: `{json.dumps(gb.get('params', {}))}`\n"
+            report_md += f"- **Selection Count**: {gb.get('selection_count', 0)} folds\n"
+
+        report_md += "\n### Per-Fold Selected Parameters\n"
+        report_md += "| Fold | Candidate | Parameters |\n"
+        report_md += "|------|-----------|------------|\n"
+        for fold_str, fold_data in selected.get("per_fold", {}).items():
+            params_str = json.dumps(fold_data.get("params", {}))
+            report_md += f"| {fold_str} | {fold_data.get('candidate_id', 'N/A')} | `{params_str}` |\n"
+
+        report_md += "\n### Robustness (Std across Outer Folds)\n"
+        report_md += f"- **Coverage Std**: {robustness.get('coverage_90_std', 0.0):.4f}\n"
+        report_md += f"- **Sharpness Std**: {robustness.get('sharpness_std', 0.0):.6f}\n"
+        report_md += f"- **MAE Std**: {robustness.get('mae_std', 0.0):.6f}\n"
+
     with open(out_dir / "report.md", "w") as f:
         f.write(report_md)
 
@@ -543,10 +652,18 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml") -
 def main():
     parser = argparse.ArgumentParser(description="Run gnosis experiment")
     parser.add_argument("--config", required=True, help="Path to experiment config YAML")
+    parser.add_argument("--hparams", default=None, help="Path to hyperparameter config YAML (enables Ralph Loop)")
     args = parser.parse_args()
 
     config = load_config(args.config)
-    report = run_experiment(config, config_path=args.config)
+
+    # Load hparams config if provided
+    hparams_config = None
+    if args.hparams:
+        with open(args.hparams) as f:
+            hparams_config = yaml.safe_load(f)
+
+    report = run_experiment(config, config_path=args.config, hparams_config=hparams_config)
 
     # Exit with error if not passing (but allow PROVISIONAL for Phase A)
     if report["status"] not in ["PASS", "PROVISIONAL"]:
