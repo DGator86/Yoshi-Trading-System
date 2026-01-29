@@ -28,6 +28,10 @@ def generate_stub_prints(
         vol = price * 0.02  # 2% daily vol
 
         for day in range(n_days):
+            # Back-compat alias: n_days + trades_per_day -> total n_trades
+            if n_days is not None:
+                n_trades = int(n_days) * int(trades_per_day)
+
             day_start = start + timedelta(days=day)
             # Add variation but ensure at least 10 trades
             variation = min(trades_per_day // 2, 5000)

@@ -3,7 +3,7 @@ import pandas as pd
 
 from gnosis.loop.ralph import RalphLoop
 from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
-from gnosis.ingest import generate_stub_prints
+from gnosis.ingest import generate_stub_prints as ingest_generate_stub_prints
 def generate_stub_prints(n: int = 5000, seed: int = 123):
     """
     Minimal deterministic prints dataframe for RalphLoop tests.
@@ -25,7 +25,7 @@ def generate_stub_prints(n: int = 5000, seed: int = 123):
     })
     return df
 def test_ralph_loop_runs_on_stub_prints():
-    prints = generate_stub_prints(["BTCUSDT"], n_days=4, trades_per_day=800, seed=123)
+    prints = ingest_generate_stub_prints(["BTCUSDT"], n_days=4, trades_per_day=800, seed=123)
     base_cfg = {
         "domains": {"D0": {"n_trades": 200}},
         "targets": {"horizon_bars": 10},

@@ -192,7 +192,61 @@ class RalphLoop:
         feats = classifier.classify(feats)
 
         # 4) particle state (may use particle.flow.span)
-        feats = ParticleState(feats, cfg.get("particle", {}))
+        pcfg = cfg.get("particle", {})
+        ps = ParticleState(pcfg)
+
+        # Fast-path: common APIs
+        if callable(ps):
+            feats = ps(feats)
+        else:
+            for name in ("compute", "apply", "transform", "run", "process", "build", "update", "annotate",
+                         "add_state", "add_particle_state", "compute_state", "compute_flow"):
+                if hasattr(ps, name) and callable(getattr(ps, name)):
+                    out = getattr(ps, name)(feats)
+                    if out is not None:
+                        feats = out
+                    break
+            else:
+                # Reflection fallback: find a public method that accepts exactly one arg (df) and returns a DataFrame
+                import inspect
+                import pandas as pd
+
+                applied = False
+                for mname in dir(ps):
+                    if mname.startswith("_"):
+                        continue
+                    low = mname.lower()
+                    # only consider plausible particle/flow/state methods to avoid accidental side-effects
+                    if not any(k in low for k in ("particle", "flow", "state")):
+                        continue
+
+                    fn = getattr(ps, mname, None)
+                    if not callable(fn):
+                        continue
+
+                    try:
+                        sig = inspect.signature(fn)
+                    except Exception:
+                        continue
+
+                    # Bound method: we want exactly one positional-or-keyword arg (the dataframe)
+                    params = [p for p in sig.parameters.values()
+                              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+                    if len(params) != 1:
+                        continue
+
+                    try:
+                        out = fn(feats)
+                    except TypeError:
+                        continue
+
+                    if isinstance(out, pd.DataFrame):
+                        feats = out
+                        applied = True
+                        break
+
+                if not applied:
+                    raise TypeError(f"Unsupported ParticleState API: {type(ps)} (no compatible df->df method found)")
 
         # 5) targets (future_return)
         horizon_bars = int(cfg.get("targets", {}).get("horizon_bars", 10))

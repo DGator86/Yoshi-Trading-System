@@ -321,6 +321,18 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
 
         all_predictions.append(preds)
         all_baseline_preds.append(baseline_preds)
+
+    # Assemble prediction frames for artifact saving
+    if all_predictions:
+        predictions_df = pd.concat(all_predictions, ignore_index=True)
+    else:
+        predictions_df = pd.DataFrame()
+
+    if all_baseline_preds:
+        baseline_predictions_df = pd.concat(all_baseline_preds, ignore_index=True)
+    else:
+        baseline_predictions_df = pd.DataFrame()
+
     if fold_results:
         avg_coverage = np.mean([f["model_coverage_90"] for f in fold_results if not np.isnan(f["model_coverage_90"])])
         avg_sharpness = np.mean([f["model_sharpness"] for f in fold_results if not np.isnan(f["model_sharpness"])])
