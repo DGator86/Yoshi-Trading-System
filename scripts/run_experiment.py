@@ -30,6 +30,7 @@ from gnosis.harness import (
     compute_ece,
     compute_stability_metrics,
 )
+from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
 from gnosis.registry import FeatureRegistry
 from gnosis.loop import RalphLoop, RalphLoopConfig
 

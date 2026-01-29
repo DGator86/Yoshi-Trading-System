@@ -26,7 +26,7 @@ from gnosis.harness import WalkForwardHarness  # kept for compatibility elsewher
 from gnosis.domains import compute_features
 from gnosis.domains import DomainAggregator
 from gnosis.regimes.kpcofgs import KPCOFGSClassifier
-from gnosis.particle.flow import compute_particle_state
+from gnosis.particle import ParticleState
 from gnosis.targets import compute_future_returns
 from gnosis.harness.scoring import (
     evaluate_predictions,
@@ -171,7 +171,7 @@ class RalphLoop:
         feats = classifier.classify(feats)
 
         # 4) particle state (may use particle.flow.span)
-        feats = compute_particle_state(feats, cfg.get("particle", {}))
+        feats = ParticleState(feats, cfg.get("particle", {}))
 
         # 5) targets (future_return)
         horizon_bars = int(cfg.get("targets", {}).get("horizon_bars", 10))
