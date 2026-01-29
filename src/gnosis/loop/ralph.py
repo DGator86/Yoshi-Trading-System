@@ -27,7 +27,7 @@ from gnosis.domains import compute_features
 from gnosis.domains import DomainAggregator
 from gnosis.regimes.kpcofgs import KPCOFGSClassifier
 from gnosis.particle import ParticleState
-from gnosis.targets import compute_future_returns
+from gnosis.harness import compute_future_returns
 from gnosis.harness.scoring import (
     evaluate_predictions,
     IsotonicCalibrator,
