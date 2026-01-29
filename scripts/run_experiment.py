@@ -33,6 +33,7 @@ from gnosis.harness import (
 from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
 from gnosis.registry import FeatureRegistry
 from gnosis.loop import RalphLoop, RalphLoopConfig
+import os
 
 
 def get_git_commit() -> str:
@@ -275,6 +276,33 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
         fold_predictor.fit(train_df, "future_return")
         preds = fold_predictor.predict(test_df)
         preds["fold"] = fold.fold_idx
+        # SIGMA_SCALE_RUN_EXPERIMENT
+        # Apply config-driven interval widening AFTER prediction, BEFORE abstain/scoring.
+        # Resolve sigma_scale from config (plus optional env override)
+        sigma_scale = 1.0
+        try:
+            sigma_scale = float(
+                os.environ.get(
+                    'GNOSIS_SIGMA_SCALE',
+                    (
+                        config.get('forecast', {}).get('sigma_scale', None)
+                        or config.get('forecast', {}).get('predictor', {}).get('sigma_scale', None)
+                        or config.get('models', {}).get('predictor', {}).get('sigma_scale', None)
+                        or config.get('models', {}).get('sigma_scale', None)
+                        or 1.0
+                    )
+                )
+            )
+        except Exception:
+            sigma_scale = 1.0
+        if sigma_scale != 1.0:
+            center = preds['q50'] if 'q50' in preds.columns else preds['x_hat']
+            half = (preds['q95'] - preds['q05']) / 2.0
+            half = half * sigma_scale
+            preds['q05'] = center - half
+            preds['q95'] = center + half
+            preds['sigma_hat'] = (preds['q95'] - preds['q05']) / 3.29
+
 
         baseline_preds = baseline.predict(test_df)
         baseline_preds["fold"] = fold.fold_idx
@@ -318,6 +346,17 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
             **{f"model_{k}": v for k, v in metrics.items()},
             **{f"baseline_{k}": v for k, v in baseline_metrics.items()},
         })
+
+        # Attach y_true (future_return) for self-contained evaluation artifacts
+
+        if isinstance(test_df, pd.DataFrame) and "future_return" in test_df.columns:
+
+            key_cols = [c for c in ["symbol","bar_idx","timestamp_end"] if c in preds.columns and c in test_df.columns]
+
+            if len(key_cols) >= 2:
+
+                preds = preds.merge(test_df[key_cols + ["future_return"]], on=key_cols, how="left")
+
 
         all_predictions.append(preds)
         all_baseline_preds.append(baseline_preds)
@@ -421,7 +460,72 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
         # Select columns in order
         available_cols = [c for c in required_cols if c in predictions_df.columns]
         predictions_df = predictions_df[available_cols]
-        predictions_df.to_parquet(out_dir / "predictions.parquet", index=False)
+        # Ensure predictions artifact is self-contained: attach future_return (y_true)
+        try:
+            import yaml
+            _cfg = yaml.safe_load(Path('configs/experiment.yaml').read_text())
+            _H = int(_cfg.get('forecast', {}).get('horizon_bars', 10))
+        except Exception:
+            _H = 10
+        _preds_save = predictions_df.sort_values(['symbol','bar_idx']).copy()
+        _preds_save['future_return'] = _preds_save.groupby('symbol')['close'].shift(-_H) / _preds_save['close'] - 1.0
+        # --- inject y_true (future_return) into predictions.parquet ---
+        _pred_out = _preds_save.copy()
+        _y_src = None
+        for _name in (
+            "bars_df","bars","domain_bars","features_df","feats","features","bars2",
+            "D0_bars","d0_bars"
+        ):
+            _v = locals().get(_name, None)
+            if _v is None:
+                continue
+            try:
+                _cols = set(_v.columns)
+            except Exception:
+                continue
+            if {"symbol","bar_idx","future_return"}.issubset(_cols):
+                _y_src = _v[["symbol","bar_idx","future_return"]].copy()
+                break
+        if _y_src is not None:
+            _pred_out = _pred_out.merge(_y_src, on=["symbol","bar_idx"], how="left")
+        else:
+            # If we can’t find y_true in locals, keep artifact as-is.
+            pass
+        # --- end inject ---
+        _pred_out.to_parquet(out_dir / "predictions.parquet", index=False)
+        # POSTSAVE_INJECT_FUTURE_RETURN
+        try:
+            import yaml
+            # (removed) pandas already imported at module scope
+            from pathlib import Path as _Path
+            from gnosis.domains.aggregator import DomainAggregator as _DomainAggregator
+            from gnosis.harness.walkforward import compute_future_returns as _compute_future_returns
+        
+            # Reopen what we just saved, reconstruct y_true from saved trades, and overwrite preds with future_return
+            _pred_path = out_dir / 'predictions.parquet'
+            _tr_path   = out_dir / 'trades.parquet'
+            if _pred_path.exists() and _tr_path.exists():
+                _preds = pd.read_parquet(_pred_path).copy()
+                if 'future_return' not in _preds.columns:
+                    _cfgH = int(config.get('forecast', {}).get('horizon_bars', 10))
+                    _dcfg = yaml.safe_load(_Path('configs/domains.yaml').read_text())
+                    _agg_cfg = {'domains': _dcfg.get('domains', _dcfg)}
+                    _prints = pd.read_parquet(_tr_path)
+                    _bars = _DomainAggregator(_agg_cfg).aggregate(_prints, 'D0').copy()
+                    if 'bar_idx' not in _bars.columns:
+                        _bars = _bars.sort_values(['symbol','timestamp_end']).reset_index(drop=True)
+                        _bars['bar_idx'] = _bars.groupby('symbol').cumcount()
+                    _bars = _bars.sort_values(['symbol','bar_idx']).reset_index(drop=True)
+                    _bars = _compute_future_returns(_bars, horizon_bars=_cfgH)
+                    _bars = _bars[['symbol','bar_idx','future_return']].copy()
+                    _preds = _preds.merge(_bars, on=['symbol','bar_idx'], how='left')
+                    # Stable ordering for determinism
+                    if 'symbol' in _preds.columns and 'bar_idx' in _preds.columns:
+                        _preds = _preds.sort_values(['symbol','bar_idx']).reset_index(drop=True)
+                    _preds.to_parquet(_pred_path, index=False)
+        except Exception as _e:
+            # Never fail the run just because y_true injection failed
+            pass
     else:
         # Create minimal predictions file
         pd.DataFrame({
@@ -463,8 +567,16 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
 
     # trades.parquet (subset of prints used)
     trades_subset = prints_df.head(10000)
-    trades_subset.to_parquet(out_dir / "trades.parquet", index=False)
-
+    # Save full prints if available (prevents tiny/truncated trades.parquet)
+    # Save full prints if available (prevents tiny/truncated trades.parquet)
+    _prints_save = locals().get('prints_df', None)
+    if _prints_save is None:
+        _prints_save = locals().get('prints', None)
+    if _prints_save is None:
+        _prints_save = locals().get('trades_df', None)
+    if _prints_save is None:
+        _prints_save = trades_subset
+    _prints_save.to_parquet(out_dir / "trades.parquet", index=False)
     # report.json (compute first, as report_hash is needed for run_metadata)
     report = {
         "status": "PASS" if 0.87 <= avg_coverage <= 0.93 else "PROVISIONAL",
