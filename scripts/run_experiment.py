@@ -22,6 +22,7 @@ from gnosis.regimes import KPCOFGSClassifier
 from gnosis.particle import ParticleState
 from gnosis.predictors import QuantilePredictor, BaselinePredictor
 from gnosis.harness import (
+from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
     WalkForwardHarness,
     compute_future_returns,
     evaluate_predictions,
@@ -253,135 +254,205 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
     fold_results = []
     calibration_data = []  # For tracking calibration across folds
 
-    for fold in harness.generate_folds(features_df):
-        # Get fold data
-        train_df = features_df.iloc[fold.train_start:fold.train_end].copy()
 
-        if len(train_df) < 10 or len(test_df) < 5:
-            continue
+      # NOTE: REAL FIX: if Ralph Loop enabled (hparams provided), we evaluate folds on TRADE-index windows
+      # and rebuild the full pipeline per fold so upstream hparams (like domains_D0_n_trades) are honored.
+      if hparams_path:
+          # Trade-index outer folds are invariant to domains.D0.n_trades (no structural mismatch)
+          base_tpb = int(config.get("domains", {}).get("D0", {}).get("n_trades", 200))
+          horizon_bars = int(config.get("targets", {}).get("horizon_bars", 10))
+          trade_harness = TradeWalkForwardHarness(wf_config, trades_per_bar=base_tpb, horizon_bars_default=horizon_bars)
 
-        # Apply fold-specific hyperparameters if Ralph Loop was run
-        fold_models_config = models_config.copy()
-        fold_regimes_config = regimes_config.copy()
-        if fold.fold_idx in selected_hparams_per_fold:
-            fold_params = selected_hparams_per_fold[fold.fold_idx]
-            if "predictor_l2_reg" in fold_params:
-                if "predictor" not in fold_models_config:
-                    fold_models_config["predictor"] = {}
-                fold_models_config["predictor"]["l2_reg"] = fold_params["predictor_l2_reg"]
-            if "confidence_floor_scale" in fold_params:
-                fold_regimes_config["confidence_floor_scale"] = fold_params["confidence_floor_scale"]
-        test_df = features_df.iloc[fold.test_start:fold.test_end].copy()
+          # Ralph selection on prints_df
+          from gnosis.loop.ralph import RalphLoop
+          ralph_cfg = hparams_config or {}
+          ralph = RalphLoop(config, ralph_cfg)
+          trials_df, selected_json = ralph.run(prints_df, trade_harness)
 
-        # Create fold-specific predictor
-        fold_predictor = QuantilePredictor(fold_models_config)
+          selected_hparams_per_fold = {}
+          per_fold = selected_json.get("per_fold", {})
+          for fold_str, fold_data in per_fold.items():
+              selected_hparams_per_fold[int(fold_str)] = fold_data.get("params", {})
 
-        # Fit and predict
-        fold_predictor.fit(train_df, "future_return")
-        preds = fold_predictor.predict(test_df)
-        preds["fold"] = fold.fold_idx
+          print(f"  Ralph Loop: {len(ralph.candidates)} candidates evaluated")
+          print(f"  Global best: {selected_json.get('global_best', {})}")
 
-        baseline_preds = baseline.predict(test_df)
-        baseline_preds["fold"] = fold.fold_idx
+          # Now evaluate outer folds by rebuilding pipeline per fold with its selected params
+          for fold in trade_harness.generate_folds(len(prints_df)):
+              # apply fold params to a deep-copied config
+              fold_cfg = json.loads(json.dumps(config))
+              fold_params = selected_hparams_per_fold.get(fold.fold_idx, {})
 
-        # Fit isotonic calibrator on training data for S_pmax
-        # Outcome: 1 if S_label prediction is "correct" (we use a proxy based on regime stability)
-        train_s_pmax = train_df["S_pmax"].values
-        # Proxy for correctness: label didn't change in next step (stability proxy)
-        train_labels = train_df["S_label"].values
-        train_labels_shifted = np.roll(train_labels, -1)
-        train_labels_shifted[-1] = train_labels[-1]  # Handle boundary
-        train_outcomes = (train_labels == train_labels_shifted).astype(float)
+              # Map known flat keys -> config paths
+              if "domains_D0_n_trades" in fold_params:
+                  fold_cfg.setdefault("domains", {}).setdefault("D0", {})["n_trades"] = int(fold_params["domains_D0_n_trades"])
+              if "particle_flow_span" in fold_params:
+                  fold_cfg.setdefault("particle", {}).setdefault("flow", {})["span"] = int(fold_params["particle_flow_span"])
+              if "predictor_l2_reg" in fold_params:
+                  fold_cfg.setdefault("models", {}).setdefault("predictor", {})["l2_reg"] = float(fold_params["predictor_l2_reg"])
+              if "confidence_floor_scale" in fold_params:
+                  fold_cfg.setdefault("regimes", {})["confidence_floor_scale"] = float(fold_params["confidence_floor_scale"])
 
-        calibrator = IsotonicCalibrator(n_bins=10)
-        calibrator.fit(train_s_pmax, train_outcomes)
+              # window prints includes extra horizon to compute test targets safely
+              tpb = int(fold_cfg.get("domains", {}).get("D0", {}).get("n_trades", base_tpb))
+              horizon_trades = horizon_bars * max(1, tpb)
+              window_end = min(len(prints_df), fold.test_end + horizon_trades)
 
-        # Apply calibration to test S_pmax
-        test_s_pmax_raw = test_df["S_pmax"].values.copy()
-        test_s_pmax_calibrated = calibrator.calibrate(test_s_pmax_raw)
-        test_df = test_df.copy()
-        test_df["S_pmax_calibrated"] = test_s_pmax_calibrated
+              window_prints = prints_df.iloc[fold.train_start:window_end].copy()
 
-        # Compute calibration diagnostics on test set
-        test_labels = test_df["S_label"].values
-        test_labels_shifted = np.roll(test_labels, -1)
-        test_labels_shifted[-1] = test_labels[-1]
-        test_outcomes = (test_labels == test_labels_shifted).astype(float)
+              # rebuild full pipeline on this window
+              bars_df = DomainAggregator(fold_cfg).aggregate(window_prints, "D0")
+              feats_df = compute_features(bars_df)
 
-        ece_raw = compute_ece(test_s_pmax_raw, test_outcomes, n_bins=10)
-        ece_calibrated = compute_ece(test_s_pmax_calibrated, test_outcomes, n_bins=10)
+              # regimes + particle + targets
+              classifier = KPCOFGSClassifier(fold_cfg.get("regimes", {}))
+              feats_df = classifier.classify(feats_df)
+              feats_df = compute_particle_state(feats_df, fold_cfg.get("particle", {}))
+              feats_df = compute_future_returns(feats_df, horizon_bars=horizon_bars)
 
-        calibration_data.append({
-            "fold": fold.fold_idx,
-            "ece_raw": ece_raw["ece"],
-            "ece_calibrated": ece_calibrated["ece"],
-            "n_samples": ece_raw["n_samples"],
-        })
+              # split into train/test bars by trade counts with purge/embargo in trades translated to bars
+              train_trades = fold.train_end - fold.train_start
+              purge_trades = (fold.val_start - fold.train_end)  # from harness
+              embargo_trades = (fold.test_start - fold.val_end)
 
-        # Apply abstain logic
-        preds = apply_abstain_logic(preds, test_df, fold_regimes_config)
+              train_bars = train_trades // max(1, tpb)
+              purge_bars = (purge_trades + max(1, tpb) - 1) // max(1, tpb)
+              # val segment exists but we don't need it for outer eval; we jump to test_start
+              val_trades = fold.val_end - fold.val_start
+              val_bars = val_trades // max(1, tpb)
+              embargo_bars = (embargo_trades + max(1, tpb) - 1) // max(1, tpb)
 
-        # Add KPCOFGS columns to predictions
-        kpcofgs_cols = ["K_label", "P_label", "C_label", "O_label", "F_label", "G_label", "S_label",
-                        "K_pmax", "P_pmax", "C_pmax", "O_pmax", "F_pmax", "G_pmax", "S_pmax",
-                        "K_entropy", "P_entropy", "C_entropy", "O_entropy", "F_entropy", "G_entropy", "S_entropy",
-                        "regime_entropy"]
-        for col in kpcofgs_cols:
-            if col in test_df.columns:
-                preds = preds.merge(
-                    test_df[["symbol", "bar_idx", col]],
-                    on=["symbol", "bar_idx"],
-                    how="left",
-                    suffixes=("", "_dup")
-                )
-                # Remove any duplicate columns
-                if f"{col}_dup" in preds.columns:
-                    preds = preds.drop(columns=[f"{col}_dup"])
+              test_trades = fold.test_end - fold.test_start
+              test_bars = test_trades // max(1, tpb)
 
-        # Add calibrated S_pmax
-        preds = preds.merge(
-            test_df[["symbol", "bar_idx", "S_pmax_calibrated"]],
-            on=["symbol", "bar_idx"],
-            how="left",
-            suffixes=("", "_dup")
-        )
-        if "S_pmax_calibrated_dup" in preds.columns:
-            preds = preds.drop(columns=["S_pmax_calibrated_dup"])
+              train_df = feats_df.iloc[:train_bars].copy()
+              test_start_bar = train_bars + purge_bars + val_bars + embargo_bars
+              test_df = feats_df.iloc[test_start_bar:test_start_bar + test_bars].copy()
 
-        # Evaluate (exclude abstained predictions for metrics)
-        non_abstain_preds = preds[~preds["abstain"]].copy() if "abstain" in preds.columns else preds
-        if len(non_abstain_preds) > 0:
-            metrics = evaluate_predictions(non_abstain_preds, test_df, "future_return")
-        else:
-            metrics = evaluate_predictions(preds, test_df, "future_return")
+              # Drop NaN targets
+              train_df = train_df.dropna(subset=["future_return"])
+              test_df = test_df.dropna(subset=["future_return"])
+              if len(train_df) < 10 or len(test_df) < 5:
+                  continue
 
-        baseline_metrics = evaluate_predictions(baseline_preds, test_df, "future_return")
+              fold_models_config = fold_cfg.get("models", {})
+              fold_regimes_config = fold_cfg.get("regimes", {})
 
-        # Compute abstention rate
-        abstention_rate = preds["abstain"].mean() if "abstain" in preds.columns else 0.0
+              fold_predictor = QuantilePredictor(fold_models_config)
+              fold_predictor.fit(train_df, "future_return")
+              preds = fold_predictor.predict(test_df)
+              preds["fold"] = fold.fold_idx
 
-        fold_results.append({
-            "fold": fold.fold_idx,
-            "n_train": len(train_df),
-            "n_test": len(test_df),
-            "abstention_rate": float(abstention_rate),
-            **{f"model_{k}": v for k, v in metrics.items()},
-            **{f"baseline_{k}": v for k, v in baseline_metrics.items()},
-        })
+              baseline_preds = baseline.predict(test_df)
+              baseline_preds["fold"] = fold.fold_idx
 
-        all_predictions.append(preds)
-        all_baseline_preds.append(baseline_preds)
+              # Calibration (Phase C logic)
+              train_s_pmax = train_df["S_pmax"].values
+              train_labels = train_df["S_label"].values
+              train_labels_shifted = np.roll(train_labels, -1)
+              train_labels_shifted[-1] = train_labels[-1]
+              train_outcomes = (train_labels == train_labels_shifted).astype(float)
 
-    # Combine predictions
-    if all_predictions:
-        predictions_df = pd.concat(all_predictions, ignore_index=True)
-        baseline_df = pd.concat(all_baseline_preds, ignore_index=True)
-    else:
-        predictions_df = pd.DataFrame()
-        baseline_df = pd.DataFrame()
+              calibrator = IsotonicCalibrator(n_bins=10)
+              calibrator.fit(train_s_pmax, train_outcomes)
 
-    # 10. Compute aggregate metrics
-    print("Computing aggregate metrics...")
+              test_s_pmax_raw = test_df["S_pmax"].values.copy()
+              test_s_pmax_calibrated = calibrator.calibrate(test_s_pmax_raw)
+              test_df = test_df.copy()
+              test_df["S_pmax_calibrated"] = test_s_pmax_calibrated
+
+              # Abstain logic
+              preds = apply_abstain_logic(preds, test_df, fold_regimes_config)
+
+              # Evaluate (exclude abstained if any)
+              non_abstain_preds = preds[~preds["abstain"]].copy() if "abstain" in preds.columns else preds
+              if len(non_abstain_preds) > 0:
+                  metrics = evaluate_predictions(non_abstain_preds, test_df, "future_return")
+              else:
+                  metrics = evaluate_predictions(preds, test_df, "future_return")
+
+              baseline_metrics = evaluate_predictions(baseline_preds, test_df, "future_return")
+              abstention_rate = preds["abstain"].mean() if "abstain" in preds.columns else 0.0
+
+              fold_results.append({
+                  "fold": fold.fold_idx,
+                  "n_train": len(train_df),
+                  "n_test": len(test_df),
+                  "abstention_rate": float(abstention_rate),
+                  **{f"model_{k}": v for k, v in metrics.items()},
+                  **{f"baseline_{k}": v for k, v in baseline_metrics.items()},
+              })
+
+              all_predictions.append(preds)
+              all_baseline_preds.append(baseline_preds)
+
+      else:
+          # Original bar-based evaluation path (no Ralph)
+          for fold in harness.generate_folds(features_df):
+              # Get fold data
+              train_df = features_df.iloc[fold.train_start:fold.train_end].copy()
+              test_df = features_df.iloc[fold.test_start:fold.test_end].copy()
+
+              if len(train_df) < 10 or len(test_df) < 5:
+                  continue
+
+              # Apply fold-specific hyperparameters if Ralph Loop was run
+              fold_models_config = models_config.copy()
+              fold_regimes_config = regimes_config.copy()
+
+              # Create fold-specific predictor
+              fold_predictor = QuantilePredictor(fold_models_config)
+
+              # Fit and predict
+              fold_predictor.fit(train_df, "future_return")
+              preds = fold_predictor.predict(test_df)
+              preds["fold"] = fold.fold_idx
+
+              baseline_preds = baseline.predict(test_df)
+              baseline_preds["fold"] = fold.fold_idx
+
+              # Fit isotonic calibrator on training data for S_pmax
+              train_s_pmax = train_df["S_pmax"].values
+              train_labels = train_df["S_label"].values
+              train_labels_shifted = np.roll(train_labels, -1)
+              train_labels_shifted[-1] = train_labels[-1]
+              train_outcomes = (train_labels == train_labels_shifted).astype(float)
+
+              calibrator = IsotonicCalibrator(n_bins=10)
+              calibrator.fit(train_s_pmax, train_outcomes)
+
+              # Apply calibration to test S_pmax
+              test_s_pmax_raw = test_df["S_pmax"].values.copy()
+              test_s_pmax_calibrated = calibrator.calibrate(test_s_pmax_raw)
+              test_df = test_df.copy()
+              test_df["S_pmax_calibrated"] = test_s_pmax_calibrated
+
+              # Apply abstain logic
+              preds = apply_abstain_logic(preds, test_df, fold_regimes_config)
+
+              # Evaluate (exclude abstained predictions for metrics)
+              non_abstain_preds = preds[~preds["abstain"]].copy() if "abstain" in preds.columns else preds
+              if len(non_abstain_preds) > 0:
+                  metrics = evaluate_predictions(non_abstain_preds, test_df, "future_return")
+              else:
+                  metrics = evaluate_predictions(preds, test_df, "future_return")
+
+              baseline_metrics = evaluate_predictions(baseline_preds, test_df, "future_return")
+
+              # Compute abstention rate
+              abstention_rate = preds["abstain"].mean() if "abstain" in preds.columns else 0.0
+
+              fold_results.append({
+                  "fold": fold.fold_idx,
+                  "n_train": len(train_df),
+                  "n_test": len(test_df),
+                  "abstention_rate": float(abstention_rate),
+                  **{f"model_{k}": v for k, v in metrics.items()},
+                  **{f"baseline_{k}": v for k, v in baseline_metrics.items()},
+              })
+
+              all_predictions.append(preds)
+              all_baseline_preds.append(baseline_preds)
     if fold_results:
         avg_coverage = np.mean([f["model_coverage_90"] for f in fold_results if not np.isnan(f["model_coverage_90"])])
         avg_sharpness = np.mean([f["model_sharpness"] for f in fold_results if not np.isnan(f["model_sharpness"])])

@@ -24,3 +24,5 @@ __all__ = [
     "compute_ece",
     "compute_stability_metrics",
 ]
+
+from .trade_walkforward import TradeWalkForwardHarness, TradeFold

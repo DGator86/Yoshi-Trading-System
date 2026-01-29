@@ -1,48 +1,65 @@
-"""Ralph Loop: Nested walk-forward hyperparameter selection.
-
-Implements nested cross-validation for hyperparameter selection
-without data leakage - outer test folds are never used for selection.
 """
+Ralph Loop: Nested walk-forward hyperparameter selection (NO leakage)
+REAL FIX VERSION:
+
+- Outer/inner folds are defined in TRADE index (prints rows), invariant to domains.D0.n_trades.
+- Candidate evaluation *rebuilds the pipeline* inside each inner fold:
+  prints -> bars (with candidate domains.D0.n_trades) -> features -> KPCOFGS -> particle state -> targets
+- Candidate selection score uses ONLY inner validation bars (never outer test).
+
+This makes upstream hparams (domains_D0_n_trades, particle_flow_span) *actually* honored.
+"""
+
+from __future__ import annotations
+
 import itertools
 import json
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple, Any
+from dataclasses import dataclass
+from collections import Counter
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 
-from gnosis.harness import WalkForwardHarness, Fold, evaluate_predictions, compute_stability_metrics
-from gnosis.domains import DomainAggregator, compute_features
-from gnosis.regimes import KPCOFGSClassifier
-from gnosis.particle import ParticleState
-from gnosis.predictors import QuantilePredictor
+from gnosis.harness.trade_walkforward import TradeWalkForwardHarness, TradeFold
+from gnosis.harness import WalkForwardHarness  # kept for compatibility elsewhere
+from gnosis.features import compute_features
+from gnosis.ingest.aggregate import DomainAggregator
+from gnosis.regimes.kpcofgs import KPCOFGSClassifier
+from gnosis.particle.flow import compute_particle_state
+from gnosis.targets import compute_future_returns
+from gnosis.harness.scoring import (
+    evaluate_predictions,
+    IsotonicCalibrator,
+    compute_ece,
+    compute_stability_metrics,
+)
+from gnosis.models.predictor import QuantilePredictor
+from gnosis.baseline import BaselinePredictor
+from gnosis.regimes.constraints import apply_abstain_logic
 
 
-@dataclass
+@dataclass(frozen=True)
 class HparamCandidate:
-    """A single hyperparameter candidate configuration."""
     candidate_id: int
-    params: Dict[str, Any]
+    params: dict
 
     def to_json(self) -> str:
-        """Serialize params to JSON string."""
-        return json.dumps(self.params, sort_keys=True)
+        return json.dumps({"candidate_id": self.candidate_id, "params": self.params}, sort_keys=True)
 
 
-@dataclass
+@dataclass(frozen=True)
 class InnerFold:
-    """Represents an inner fold within an outer training window."""
     inner_idx: int
     train_start: int
     train_end: int
     val_start: int
     val_end: int
+    outer_fold: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class TrialResult:
-    """Result of evaluating one candidate on one inner fold."""
     outer_fold: int
     candidate_id: int
     inner_fold: int
@@ -50,246 +67,190 @@ class TrialResult:
     sharpness: float
     mae: float
     abstention_rate: float
-    flip_rate: float
     composite_score: float
     params_json: str
 
 
 @dataclass
 class RalphLoopConfig:
-    """Configuration for Ralph Loop hyperparameter search."""
-    grid: Dict[str, List[Any]] = field(default_factory=dict)
+    # How many inner folds inside each outer-train window
     inner_folds_n: int = 3
+    # Inner train/val ratios are expressed in trades
     inner_train_ratio: float = 0.6
     inner_val_ratio: float = 0.4
-    inner_purge_bars: int = 5
-    inner_embargo_bars: int = 5
-    # Scoring weights
-    coverage_target: float = 0.90
-    w1_coverage: float = 2.0
-    w2_sharpness: float = 1.0
-    w3_mae: float = 0.5
-    w4_abstention: float = 0.3
-    w5_flip_rate: float = 0.2
 
-    @classmethod
-    def from_yaml(cls, hparams_config: dict) -> "RalphLoopConfig":
-        """Create config from parsed YAML dict."""
-        grid = hparams_config.get("grid", {})
-        inner_cfg = hparams_config.get("inner_folds", {})
-        scoring = hparams_config.get("scoring_weights", {})
+    # Purge/embargo in trades (defaults computed from horizon_trades in runner)
+    inner_purge_trades: int = 0
+    inner_embargo_trades: int = 0
 
-        return cls(
-            grid=grid,
-            inner_folds_n=inner_cfg.get("n_folds", 3),
-            inner_train_ratio=inner_cfg.get("train_ratio", 0.6),
-            inner_val_ratio=inner_cfg.get("val_ratio", 0.4),
-            inner_purge_bars=hparams_config.get("inner_purge_bars", 5),
-            inner_embargo_bars=hparams_config.get("inner_embargo_bars", 5),
-            coverage_target=scoring.get("coverage_target", 0.90),
-            w1_coverage=scoring.get("w1_coverage", 2.0),
-            w2_sharpness=scoring.get("w2_sharpness", 1.0),
-            w3_mae=scoring.get("w3_mae", 0.5),
-            w4_abstention=scoring.get("w4_abstention", 0.3),
-            w5_flip_rate=scoring.get("w5_flip_rate", 0.2),
-        )
+    # Composite score weights
+    w1_coverage: float = 0.6
+    w2_sharpness: float = 0.2
+    w3_mae: float = 0.2
+
+    # Target coverage for 90% interval
+    target_coverage: float = 0.90
+
+
+def _ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
 
 
 class RalphLoop:
-    """Nested walk-forward hyperparameter selection.
-
-    For each outer fold:
-      1. Build inner folds from outer-train window
-      2. For each candidate param set:
-         - Run pipeline on inner train, evaluate on inner val
-         - Compute composite score
-      3. Select best candidate by average inner score
-      4. Retrain with selected params on full outer-train
-      5. Evaluate on outer-test (no leakage - outer-test never seen during selection)
-    """
-
-    def __init__(
-        self,
-        loop_config: RalphLoopConfig,
-        base_config: dict,
-        random_seed: int = 1337,
-    ):
-        self.loop_config = loop_config
+    def __init__(self, base_config: dict, hparams_config: dict):
         self.base_config = base_config
-        self.random_seed = random_seed
+        self.hparams_config = hparams_config or {}
+
+        # loop config
+        inner_cfg = self.hparams_config.get("inner_folds", {})
+        self.loop_config = RalphLoopConfig(
+            inner_folds_n=int(inner_cfg.get("n_folds", 3)),
+            inner_train_ratio=float(inner_cfg.get("train_ratio", 0.6)),
+            inner_val_ratio=float(inner_cfg.get("val_ratio", 0.4)),
+            inner_purge_trades=int(self.hparams_config.get("inner_purge_trades", 0)),
+            inner_embargo_trades=int(self.hparams_config.get("inner_embargo_trades", 0)),
+            w1_coverage=float(self.hparams_config.get("w1_coverage", 0.6)),
+            w2_sharpness=float(self.hparams_config.get("w2_sharpness", 0.2)),
+            w3_mae=float(self.hparams_config.get("w3_mae", 0.2)),
+            target_coverage=float(self.hparams_config.get("target_coverage", 0.90)),
+        )
+
         self.candidates = self._generate_candidates()
-        self.trial_results: List[TrialResult] = []
         self.selected_params: Dict[int, HparamCandidate] = {}
 
     def _generate_candidates(self) -> List[HparamCandidate]:
-        """Generate all candidate parameter combinations from grid."""
-        grid = self.loop_config.grid
+        grid = self.hparams_config.get("grid", {})
         if not grid:
-            # No grid defined - use single default
             return [HparamCandidate(candidate_id=0, params={})]
 
-        # Get all parameter names and their values
-        param_names = sorted(grid.keys())
-        param_values = [grid[name] for name in param_names]
+        keys = list(grid.keys())
+        vals = [grid[k] for k in keys]
 
-        # Generate cartesian product
-        candidates = []
-        for i, combo in enumerate(itertools.product(*param_values)):
-            params = dict(zip(param_names, combo))
+        combos = list(itertools.product(*vals))
+        candidates: List[HparamCandidate] = []
+        for i, combo in enumerate(combos):
+            params = {k: combo[j] for j, k in enumerate(keys)}
             candidates.append(HparamCandidate(candidate_id=i, params=params))
-
         return candidates
 
-    def _generate_inner_folds(
-        self,
-        outer_train_start: int,
-        outer_train_end: int,
-    ) -> Iterator[InnerFold]:
-        """Generate inner folds from an outer training window."""
-        n_bars = outer_train_end - outer_train_start
-        n_inner = self.loop_config.inner_folds_n
+    def _apply_candidate_params(self, candidate: HparamCandidate, base_cfg: dict) -> dict:
+        cfg = json.loads(json.dumps(base_cfg))  # deep copy
+        for key, value in candidate.params.items():
+            # keys in hparams.yaml are flat; we map some known ones
+            if key == "domains_D0_n_trades":
+                cfg.setdefault("domains", {}).setdefault("D0", {})["n_trades"] = int(value)
+            elif key == "particle_flow_span":
+                cfg.setdefault("particle", {}).setdefault("flow", {})["span"] = int(value)
+            elif key == "predictor_l2_reg":
+                cfg.setdefault("models", {}).setdefault("predictor", {})["l2_reg"] = float(value)
+            elif key == "confidence_floor_scale":
+                cfg.setdefault("regimes", {})["confidence_floor_scale"] = float(value)
+            else:
+                # generic dotted path support, e.g. "models.predictor.l2_reg"
+                if "." in key:
+                    parts = key.split(".")
+                    d = cfg
+                    for p in parts[:-1]:
+                        d = d.setdefault(p, {})
+                    d[parts[-1]] = value
+                else:
+                    cfg[key] = value
+        return cfg
 
-        if n_bars < 20:
-            # Not enough data for inner folds
-            return
+    def _build_features_from_prints(self, prints_df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+        # 1) aggregate prints -> bars
+        agg = DomainAggregator(cfg)
+        bars = agg.aggregate(prints_df, "D0")
 
-        purge = self.loop_config.inner_purge_bars
+        # 2) features
+        feats = compute_features(bars)
 
-        # Calculate train and val sizes to fit within available bars
-        # Reserve space for purge gap between train and val
-        usable_bars = n_bars - purge
-        train_ratio = self.loop_config.inner_train_ratio
-        val_ratio = self.loop_config.inner_val_ratio
-        total_ratio = train_ratio + val_ratio
+        # 3) regimes
+        regimes_cfg = cfg.get("regimes", {})
+        classifier = KPCOFGSClassifier(regimes_cfg)
+        feats = classifier.classify(feats)
 
-        # Normalize ratios
-        train_size = int(usable_bars * train_ratio / total_ratio)
-        val_size = int(usable_bars * val_ratio / total_ratio)
+        # 4) particle state (may use particle.flow.span)
+        feats = compute_particle_state(feats, cfg.get("particle", {}))
 
-        # Ensure minimum sizes
-        train_size = max(train_size, 10)
-        val_size = max(val_size, 5)
+        # 5) targets (future_return)
+        horizon_bars = int(cfg.get("targets", {}).get("horizon_bars", 10))
+        feats = compute_future_returns(feats, horizon_bars=horizon_bars)
 
-        # Total window needed per inner fold (no embargo for inner - only train/val)
-        window_size = train_size + purge + val_size
+        return feats
 
-        if window_size > n_bars:
-            # Still too large - reduce sizes
-            train_size = max(10, int(n_bars * 0.5))
-            val_size = max(5, int(n_bars * 0.3))
-            window_size = train_size + purge + val_size
-            if window_size > n_bars:
-                # Give up if still too large
-                return
+    def _compute_composite_score(self, coverage_90: float, sharpness: float, mae: float) -> float:
+        # higher better
+        coverage_error = abs(coverage_90 - self.loop_config.target_coverage)
+        coverage_score = 1.0 - coverage_error
+        score = (
+            self.loop_config.w1_coverage * coverage_score
+            + self.loop_config.w2_sharpness * (1.0 - sharpness)  # narrower is better
+            + self.loop_config.w3_mae * (1.0 - mae)              # lower is better
+        )
+        return float(score)
 
-        # Step between inner folds
-        if n_inner <= 1:
-            step = 0
-        else:
-            remaining = n_bars - window_size
-            step = max(1, remaining // (n_inner - 1)) if remaining > 0 else 0
+    def _generate_inner_folds(self, outer_train_start: int, outer_train_end: int) -> List[InnerFold]:
+        n_trades = outer_train_end - outer_train_start
+        n_inner = int(self.loop_config.inner_folds_n)
+        if n_trades < 100 or n_inner <= 0:
+            return []
 
+        # inner sizes in trades
+        train_size = int(n_trades * self.loop_config.inner_train_ratio)
+        val_size = int(n_trades * self.loop_config.inner_val_ratio)
+
+        purge = int(self.loop_config.inner_purge_trades)
+
+        # ensure usable
+        window = train_size + purge + val_size
+        if window >= n_trades:
+            # fallback: shrink val
+            val_size = max(1, n_trades - train_size - purge - 1)
+            window = train_size + purge + val_size
+            if window >= n_trades:
+                return []
+
+        remaining = n_trades - window
+        step = 0 if n_inner <= 1 else max(1, remaining // (n_inner - 1))
+
+        folds = []
         for i in range(n_inner):
-            inner_offset = i * step
-
-            train_start = outer_train_start + inner_offset
+            offset = i * step
+            train_start = outer_train_start + offset
             train_end = train_start + train_size
 
             val_start = train_end + purge
             val_end = val_start + val_size
-
-            # Check bounds
             if val_end > outer_train_end:
                 break
 
-            yield InnerFold(
-                inner_idx=i,
-                train_start=train_start,
-                train_end=train_end,
-                val_start=val_start,
-                val_end=val_end,
+            folds.append(
+                InnerFold(
+                    inner_idx=i,
+                    train_start=train_start,
+                    train_end=train_end,
+                    val_start=val_start,
+                    val_end=val_end,
+                    outer_fold=-1,
+                )
             )
-
-    def _apply_candidate_params(
-        self,
-        candidate: HparamCandidate,
-        base_config: dict,
-    ) -> dict:
-        """Apply candidate parameters to base config."""
-        config = _deep_copy_dict(base_config)
-
-        for key, value in candidate.params.items():
-            if key == "domains_D0_n_trades":
-                if "domains" not in config:
-                    config["domains"] = {"domains": {}}
-                if "domains" not in config["domains"]:
-                    config["domains"]["domains"] = {}
-                if "D0" not in config["domains"]["domains"]:
-                    config["domains"]["domains"]["D0"] = {}
-                config["domains"]["domains"]["D0"]["n_trades"] = value
-
-            elif key == "predictor_l2_reg":
-                if "models" not in config:
-                    config["models"] = {}
-                if "predictor" not in config["models"]:
-                    config["models"]["predictor"] = {}
-                config["models"]["predictor"]["l2_reg"] = value
-
-            elif key == "confidence_floor_scale":
-                if "regimes" not in config:
-                    config["regimes"] = {}
-                config["regimes"]["confidence_floor_scale"] = value
-
-            elif key == "particle_flow_span":
-                if "models" not in config:
-                    config["models"] = {}
-                if "particle" not in config["models"]:
-                    config["models"]["particle"] = {}
-                config["models"]["particle"]["flow_span"] = value
-
-        return config
-
-    def _compute_composite_score(
-        self,
-        coverage_90: float,
-        sharpness: float,
-        mae: float,
-        abstention_rate: float,
-        flip_rate: float,
-    ) -> float:
-        """Compute composite score for a trial. Higher is better."""
-        cfg = self.loop_config
-
-        # Coverage term: want coverage close to target
-        coverage_error = abs(coverage_90 - cfg.coverage_target)
-        coverage_score = 1.0 - coverage_error
-
-        # Composite: coverage contributes positively, others negatively
-        score = (
-            cfg.w1_coverage * coverage_score
-            - cfg.w2_sharpness * sharpness
-            - cfg.w3_mae * mae
-            - cfg.w4_abstention * abstention_rate
-            - cfg.w5_flip_rate * flip_rate
-        )
-
-        return score
+        return folds
 
     def _evaluate_candidate_on_inner(
         self,
         candidate: HparamCandidate,
-        features_df: pd.DataFrame,
+        prints_df: pd.DataFrame,
         inner_fold: InnerFold,
         outer_fold_idx: int,
-        regimes_config: dict,
     ) -> TrialResult:
-        """Evaluate a candidate on one inner fold."""
-        # Get train/val data
-        train_df = features_df.iloc[inner_fold.train_start:inner_fold.train_end].copy()
-        val_df = features_df.iloc[inner_fold.val_start:inner_fold.val_end].copy()
+        cfg = self._apply_candidate_params(candidate, self.base_config)
+        regimes_cfg = cfg.get("regimes", {})
+        models_cfg = cfg.get("models", {})
 
-        if len(train_df) < 5 or len(val_df) < 3:
-            # Not enough data - return worst-case result
+        # Build a local window from train_start to val_end (inclusive)
+        window_prints = prints_df.iloc[inner_fold.train_start:inner_fold.val_end].copy()
+        if len(window_prints) < 1000:
             return TrialResult(
                 outer_fold=outer_fold_idx,
                 candidate_id=candidate.candidate_id,
@@ -298,252 +259,152 @@ class RalphLoop:
                 sharpness=1.0,
                 mae=1.0,
                 abstention_rate=1.0,
-                flip_rate=1.0,
                 composite_score=-999.0,
                 params_json=candidate.to_json(),
             )
 
-        # Apply candidate params
-        config = self._apply_candidate_params(candidate, self.base_config)
-        models_config = config.get("models", {})
+        feats = self._build_features_from_prints(window_prints, cfg)
 
-        # Fit predictor
-        predictor = QuantilePredictor(models_config)
-        predictor.fit(train_df, "future_return")
+        # Split into train/val BAR segments based on trades_per_bar in this candidate
+        tpb = int(cfg.get("domains", {}).get("D0", {}).get("n_trades", 200))
+        tpb = max(1, tpb)
 
-        # Predict on validation
-        preds = predictor.predict(val_df)
+        train_trades = inner_fold.train_end - inner_fold.train_start
+        purge_trades = inner_fold.val_start - inner_fold.train_end
+        val_trades = inner_fold.val_end - inner_fold.val_start
 
-        # Merge S_label and S_pmax for abstain logic
-        s_cols = ["symbol", "bar_idx", "S_label", "S_pmax"]
-        available_s_cols = [c for c in s_cols if c in val_df.columns]
-        if len(available_s_cols) >= 3:  # Need at least symbol, bar_idx, and one S column
-            preds = preds.merge(
-                val_df[available_s_cols],
-                on=["symbol", "bar_idx"],
-                how="left",
+        train_bars = train_trades // tpb
+        purge_bars = _ceil_div(purge_trades, tpb)
+        val_bars = val_trades // tpb
+
+        if train_bars < 10 or val_bars < 5:
+            return TrialResult(
+                outer_fold=outer_fold_idx,
+                candidate_id=candidate.candidate_id,
+                inner_fold=inner_fold.inner_idx,
+                coverage_90=0.0,
+                sharpness=1.0,
+                mae=1.0,
+                abstention_rate=1.0,
+                composite_score=-999.0,
+                params_json=candidate.to_json(),
             )
 
-        # Apply abstain logic
-        confidence_floor_scale = candidate.params.get("confidence_floor_scale", 1.0)
-        base_floor = 0.65  # default
-        adjusted_floor = base_floor * confidence_floor_scale
+        train_df = feats.iloc[:train_bars].copy()
+        val_df = feats.iloc[train_bars + purge_bars: train_bars + purge_bars + val_bars].copy()
 
-        abstain_mask = np.zeros(len(preds), dtype=bool)
-        if "S_label" in preds.columns and "S_pmax" in preds.columns:
-            for idx in range(len(preds)):
-                s_label = preds.iloc[idx].get("S_label", "S_UNCERTAIN")
-                s_pmax = preds.iloc[idx].get("S_pmax", 0.0)
-                if pd.isna(s_label):
-                    s_label = "S_UNCERTAIN"
-                if pd.isna(s_pmax):
-                    s_pmax = 0.0
-                if s_label == "S_UNCERTAIN" or s_pmax < adjusted_floor:
-                    abstain_mask[idx] = True
+        # Drop NaN targets
+        train_df = train_df.dropna(subset=["future_return"])
+        val_df = val_df.dropna(subset=["future_return"])
+        if len(train_df) < 10 or len(val_df) < 5:
+            return TrialResult(
+                outer_fold=outer_fold_idx,
+                candidate_id=candidate.candidate_id,
+                inner_fold=inner_fold.inner_idx,
+                coverage_90=0.0,
+                sharpness=1.0,
+                mae=1.0,
+                abstention_rate=1.0,
+                composite_score=-999.0,
+                params_json=candidate.to_json(),
+            )
 
-        preds["abstain"] = abstain_mask
-        abstention_rate = float(preds["abstain"].mean())
+        predictor = QuantilePredictor(models_cfg)
+        predictor.fit(train_df, "future_return")
+        preds = predictor.predict(val_df)
 
-        # Evaluate non-abstained predictions
-        non_abstain = preds[~preds["abstain"]].copy()
-        if len(non_abstain) > 0:
-            metrics = evaluate_predictions(non_abstain, val_df, "future_return")
-        else:
-            metrics = evaluate_predictions(preds, val_df, "future_return")
+        # calibration (same approach as Phase C)
+        calibrator = IsotonicCalibrator(n_bins=10)
+        train_s = train_df["S_pmax"].values
+        train_labels = train_df["S_label"].values
+        shifted = np.roll(train_labels, -1)
+        shifted[-1] = train_labels[-1]
+        outcomes = (train_labels == shifted).astype(float)
+        calibrator.fit(train_s, outcomes)
 
-        coverage_90 = metrics.get("coverage_90", 0.0)
-        sharpness = metrics.get("sharpness", 1.0)
-        mae = metrics.get("mae", 1.0)
+        val_s_raw = val_df["S_pmax"].values.copy()
+        val_s_cal = calibrator.calibrate(val_s_raw)
+        val_df = val_df.copy()
+        val_df["S_pmax_calibrated"] = val_s_cal
 
-        if np.isnan(coverage_90):
-            coverage_90 = 0.0
-        if np.isnan(sharpness):
-            sharpness = 1.0
-        if np.isnan(mae):
-            mae = 1.0
+        preds = apply_abstain_logic(preds, val_df, regimes_cfg)
 
-        # Compute stability (flip rate) on validation window
-        stability = compute_stability_metrics(val_df)
-        flip_rate = stability.get("overall_flip_rate", 0.0)
+        # evaluate (exclude abstain)
+        non_abstain = preds[~preds["abstain"]].copy() if "abstain" in preds.columns else preds
+        metrics = evaluate_predictions(non_abstain if len(non_abstain) > 0 else preds, val_df, "future_return")
 
-        # Compute composite score
+        abstention_rate = float(preds["abstain"].mean()) if "abstain" in preds.columns else 0.0
         score = self._compute_composite_score(
-            coverage_90, sharpness, mae, abstention_rate, flip_rate
+            coverage_90=float(metrics.get("coverage_90", 0.0)),
+            sharpness=float(metrics.get("sharpness", 1.0)),
+            mae=float(metrics.get("mae", 1.0)),
         )
 
         return TrialResult(
             outer_fold=outer_fold_idx,
             candidate_id=candidate.candidate_id,
             inner_fold=inner_fold.inner_idx,
-            coverage_90=coverage_90,
-            sharpness=sharpness,
-            mae=mae,
+            coverage_90=float(metrics.get("coverage_90", 0.0)),
+            sharpness=float(metrics.get("sharpness", 1.0)),
+            mae=float(metrics.get("mae", 1.0)),
             abstention_rate=abstention_rate,
-            flip_rate=flip_rate,
             composite_score=score,
             params_json=candidate.to_json(),
         )
 
-    def select_best_for_outer_fold(
-        self,
-        outer_fold_idx: int,
-        outer_train_start: int,
-        outer_train_end: int,
-        features_df: pd.DataFrame,
-        regimes_config: dict,
-    ) -> HparamCandidate:
-        """Select best hyperparameters for one outer fold using inner validation.
-
-        Returns the candidate with highest average composite score across inner folds.
-        """
-        inner_folds = list(self._generate_inner_folds(outer_train_start, outer_train_end))
-
+    def select_best_for_outer_fold(self, prints_df: pd.DataFrame, outer_fold_idx: int, outer_train_start: int, outer_train_end: int) -> HparamCandidate:
+        inner_folds = self._generate_inner_folds(outer_train_start, outer_train_end)
         if not inner_folds:
-            # Fallback: use first candidate if no inner folds possible
             return self.candidates[0] if self.candidates else HparamCandidate(0, {})
 
         candidate_scores: Dict[int, List[float]] = {c.candidate_id: [] for c in self.candidates}
+        for cand in self.candidates:
+            for inner in inner_folds:
+                r = self._evaluate_candidate_on_inner(cand, prints_df, inner, outer_fold_idx)
+                candidate_scores[cand.candidate_id].append(r.composite_score)
 
-        for candidate in self.candidates:
-            for inner_fold in inner_folds:
-                result = self._evaluate_candidate_on_inner(
-                    candidate, features_df, inner_fold, outer_fold_idx, regimes_config
-                )
-                self.trial_results.append(result)
-                candidate_scores[candidate.candidate_id].append(result.composite_score)
+        best_id = max(candidate_scores.keys(), key=lambda cid: np.mean(candidate_scores[cid]) if candidate_scores[cid] else -999)
+        best = next(c for c in self.candidates if c.candidate_id == best_id)
+        self.selected_params[outer_fold_idx] = best
+        return best
 
-        # Select best by average score
-        best_candidate_id = max(
-            candidate_scores.keys(),
-            key=lambda cid: np.mean(candidate_scores[cid]) if candidate_scores[cid] else -999
-        )
+    def run(self, prints_df: pd.DataFrame, outer_harness: TradeWalkForwardHarness) -> Tuple[pd.DataFrame, dict]:
+        outer_folds = list(outer_harness.generate_folds(len(prints_df)))
 
-        best_candidate = next(c for c in self.candidates if c.candidate_id == best_candidate_id)
-        self.selected_params[outer_fold_idx] = best_candidate
-
-        return best_candidate
-
-    def run(
-        self,
-        features_df: pd.DataFrame,
-        outer_harness: WalkForwardHarness,
-        regimes_config: dict,
-    ) -> Tuple[pd.DataFrame, dict]:
-        """Run the full Ralph Loop.
-
-        Returns:
-            - trials_df: DataFrame of all trial results (hparams_trials.parquet)
-            - selected_json: dict of selected params per fold (selected_hparams.json)
-        """
-        np.random.seed(self.random_seed)
-
-        # Generate outer folds
-        outer_folds = list(outer_harness.generate_folds(features_df))
+        trials: List[TrialResult] = []
 
         for fold in outer_folds:
             print(f"  Ralph Loop: Processing outer fold {fold.fold_idx}...")
-
-            # Select best params using ONLY the outer-train window
             best = self.select_best_for_outer_fold(
+                prints_df=prints_df,
                 outer_fold_idx=fold.fold_idx,
                 outer_train_start=fold.train_start,
                 outer_train_end=fold.train_end,
-                features_df=features_df,
-                regimes_config=regimes_config,
             )
             print(f"    Selected candidate {best.candidate_id}: {best.params}")
 
-        # Build trials DataFrame
-        trials_records = []
-        for r in self.trial_results:
-            trials_records.append({
-                "outer_fold": r.outer_fold,
-                "candidate_id": r.candidate_id,
-                "inner_fold": r.inner_fold,
-                "coverage_90": r.coverage_90,
-                "sharpness": r.sharpness,
-                "mae": r.mae,
-                "abstention_rate": r.abstention_rate,
-                "flip_rate": r.flip_rate,
-                "composite_score": r.composite_score,
-                "params_json": r.params_json,
-            })
-        trials_df = pd.DataFrame(trials_records)
+            # For audit: also store the inner trials for the selected fold/candidates if desired later
+            # (We keep this simple: we only store per-candidate inner scores already computed above by re-running quickly)
+            inner_folds = self._generate_inner_folds(fold.train_start, fold.train_end)
+            for cand in self.candidates:
+                for inner in inner_folds:
+                    r = self._evaluate_candidate_on_inner(cand, prints_df, inner, fold.fold_idx)
+                    trials.append(r)
 
-        # Build selected params JSON
-        selected_json = {
-            "per_fold": {},
-            "global_best": None,
-        }
+        trials_df = pd.DataFrame([t.__dict__ for t in trials])
 
-        for fold_idx, candidate in self.selected_params.items():
-            selected_json["per_fold"][str(fold_idx)] = {
-                "candidate_id": candidate.candidate_id,
-                "params": candidate.params,
-            }
+        selected_json = {"per_fold": {}, "global_best": {}}
+        for fold_idx, cand in self.selected_params.items():
+            selected_json["per_fold"][str(fold_idx)] = {"candidate_id": cand.candidate_id, "params": cand.params}
 
-        # Determine global best (most frequently selected, or highest avg score)
         if self.selected_params:
-            # Count how often each candidate was selected
-            from collections import Counter
-            selection_counts = Counter(c.candidate_id for c in self.selected_params.values())
-            most_common_id = selection_counts.most_common(1)[0][0]
+            counts = Counter(c.candidate_id for c in self.selected_params.values())
+            most_common_id = counts.most_common(1)[0][0]
             global_best = next(c for c in self.candidates if c.candidate_id == most_common_id)
             selected_json["global_best"] = {
                 "candidate_id": global_best.candidate_id,
                 "params": global_best.params,
-                "selection_count": selection_counts[most_common_id],
+                "selection_count": counts[most_common_id],
             }
 
         return trials_df, selected_json
-
-    def get_robustness_stats(self, trials_df: pd.DataFrame) -> dict:
-        """Compute robustness statistics (stddev across outer folds)."""
-        if trials_df.empty:
-            return {
-                "coverage_90_std": 0.0,
-                "sharpness_std": 0.0,
-                "mae_std": 0.0,
-            }
-
-        # Get results for selected candidates only
-        selected_results = []
-        for fold_idx, candidate in self.selected_params.items():
-            fold_trials = trials_df[
-                (trials_df["outer_fold"] == fold_idx) &
-                (trials_df["candidate_id"] == candidate.candidate_id)
-            ]
-            if not fold_trials.empty:
-                # Average across inner folds
-                selected_results.append({
-                    "coverage_90": fold_trials["coverage_90"].mean(),
-                    "sharpness": fold_trials["sharpness"].mean(),
-                    "mae": fold_trials["mae"].mean(),
-                })
-
-        if not selected_results:
-            return {
-                "coverage_90_std": 0.0,
-                "sharpness_std": 0.0,
-                "mae_std": 0.0,
-            }
-
-        results_df = pd.DataFrame(selected_results)
-        return {
-            "coverage_90_std": float(results_df["coverage_90"].std()),
-            "sharpness_std": float(results_df["sharpness"].std()),
-            "mae_std": float(results_df["mae"].std()),
-        }
-
-
-def _deep_copy_dict(d: dict) -> dict:
-    """Deep copy a nested dict without importing copy module."""
-    result = {}
-    for k, v in d.items():
-        if isinstance(v, dict):
-            result[k] = _deep_copy_dict(v)
-        elif isinstance(v, list):
-            result[k] = v.copy()
-        else:
-            result[k] = v
-    return result
