@@ -3,6 +3,7 @@ import pandas as pd
 
 from gnosis.loop.ralph import RalphLoop
 from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
+from gnosis.ingest import generate_stub_prints
 def generate_stub_prints(n: int = 5000, seed: int = 123):
     """
     Minimal deterministic prints dataframe for RalphLoop tests.
