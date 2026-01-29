@@ -1,0 +1,28 @@
+symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+venue: "binance_spot"
+dataset:
+  mode: "parquet"
+  parquet_dir: "data/parquet"
+
+random_seed: 1337
+
+walkforward:
+  outer_folds: 8
+  train_days: 180
+  val_days: 30
+  test_days: 30
+  purge_trades: "HORIZON"
+  embargo_trades: "HORIZON"
+
+forecast:
+  target: "price_at_time"
+  baseline_required: true
+  coverage_targets:
+    p90_min: 0.87
+    p90_max: 0.93
+  scoring:
+    primary: "pinball_loss"
+    secondary: ["crps_approx", "sharpness", "mae"]
+
+artifacts:
+  out_dir: "reports/latest"

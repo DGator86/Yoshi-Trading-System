@@ -1,0 +1,7 @@
+[project]
+name = "gnosis-particle-bot"
+version = "0.0.1"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
