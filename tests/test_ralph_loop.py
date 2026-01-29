@@ -3,8 +3,26 @@ import pandas as pd
 
 from gnosis.loop.ralph import RalphLoop
 from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
-from gnosis.ingest.stub import generate_stub_prints
+def generate_stub_prints(n: int = 5000, seed: int = 123):
+    """
+    Minimal deterministic prints dataframe for RalphLoop tests.
+    Columns chosen to satisfy the pipeline stages used in ralph.py/run_experiment.py.
+    """
+    import numpy as np
+    import pandas as pd
 
+    rng = np.random.default_rng(seed)
+    # Fake prints: price random walk + volume
+    price = 100.0 + np.cumsum(rng.normal(0, 0.05, size=n))
+    size = rng.integers(1, 10, size=n)
+    ts = pd.date_range("2024-01-01", periods=n, freq="S")
+
+    df = pd.DataFrame({
+        "ts": ts,
+        "price": price,
+        "size": size,
+    })
+    return df
 def test_ralph_loop_runs_on_stub_prints():
     prints = generate_stub_prints(["BTCUSDT"], n_days=4, trades_per_day=800, seed=123)
     base_cfg = {
