@@ -256,7 +256,6 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
     for fold in harness.generate_folds(features_df):
         # Get fold data
         train_df = features_df.iloc[fold.train_start:fold.train_end].copy()
-        test_df = features_df.iloc[fold.test_start:fold.test_end].copy()
 
         if len(train_df) < 10 or len(test_df) < 5:
             continue
@@ -272,6 +271,7 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
                 fold_models_config["predictor"]["l2_reg"] = fold_params["predictor_l2_reg"]
             if "confidence_floor_scale" in fold_params:
                 fold_regimes_config["confidence_floor_scale"] = fold_params["confidence_floor_scale"]
+        test_df = features_df.iloc[fold.test_start:fold.test_end].copy()
 
         # Create fold-specific predictor
         fold_predictor = QuantilePredictor(fold_models_config)
