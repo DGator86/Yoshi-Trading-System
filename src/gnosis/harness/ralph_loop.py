@@ -24,6 +24,30 @@ from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 import pandas as pd
 
+from typing import List
+
+
+def _drop_future_return_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure we NEVER carry truth columns inside predictions until the single attach-truth step.
+    This prevents pandas from creating future_return_x / future_return_y during merges.
+    """
+    cols = [c for c in df.columns if c.startswith("future_return")]
+    if cols:
+        return df.drop(columns=cols, errors="ignore")
+    return df
+
+
+def _safe_merge_no_truth(
+    left: pd.DataFrame, right: pd.DataFrame, on: List[str], how: str = "left"
+) -> pd.DataFrame:
+    """
+    Merge right into left but *force* right to not contribute any future_return* columns.
+    """
+    right = right[[c for c in right.columns if not c.startswith("future_return")]]
+    return left.merge(right, on=on, how=how)
+
+
 from gnosis.harness.walkforward import WalkForwardHarness, Fold, compute_future_returns
 from gnosis.harness.scoring import (
     evaluate_predictions,
@@ -129,7 +153,9 @@ class FeatureCacheManager:
         features_df = compute_future_returns(features_df, horizon_bars=horizon_bars)
 
         # Sort for determinism
-        features_df = features_df.sort_values(["symbol", "bar_idx"]).reset_index(drop=True)
+        features_df = features_df.sort_values(["symbol", "bar_idx"]).reset_index(
+            drop=True
+        )
 
         # Cache the result
         self._cache[n_trades] = features_df.copy()
@@ -148,15 +174,18 @@ class FeatureCacheManager:
 @dataclass
 class RalphLoopConfig:
     """Configuration for nested walk-forward hyperparameter selection."""
+
     enabled: bool = True
     target_coverage: float = 0.90
-    weights: Dict[str, float] = field(default_factory=lambda: {
-        "coverage": 4.0,
-        "wis": 1.0,
-        "is90": 0.5,
-        "mae": 1.0,
-        "abstention": 0.5,
-    })
+    weights: Dict[str, float] = field(
+        default_factory=lambda: {
+            "coverage": 4.0,
+            "wis": 1.0,
+            "is90": 0.5,
+            "mae": 1.0,
+            "abstention": 0.5,
+        }
+    )
     inner_folds: int = 3
     purge_bars: int = 10
     embargo_bars: int = 10
@@ -189,13 +218,16 @@ class RalphLoopConfig:
         return cls(
             enabled=bool(cfg.get("enabled", True)),
             target_coverage=float(cfg.get("target_coverage", 0.90)),
-            weights=cfg.get("weights", {
-                "coverage": 4.0,
-                "wis": 1.0,
-                "is90": 0.5,
-                "mae": 1.0,
-                "abstention": 0.5,
-            }),
+            weights=cfg.get(
+                "weights",
+                {
+                    "coverage": 4.0,
+                    "wis": 1.0,
+                    "is90": 0.5,
+                    "mae": 1.0,
+                    "abstention": 0.5,
+                },
+            ),
             inner_folds=int(cfg.get("inner_folds", 3)),
             purge_bars=int(cfg.get("purge_bars", 10)),
             embargo_bars=int(cfg.get("embargo_bars", 10)),
@@ -206,16 +238,20 @@ class RalphLoopConfig:
 @dataclass(frozen=True)
 class HparamCandidate:
     """A hyperparameter candidate with id and params."""
+
     candidate_id: int
     params: Dict[str, Any]
 
     def to_json(self) -> str:
-        return json.dumps({"candidate_id": self.candidate_id, "params": self.params}, sort_keys=True)
+        return json.dumps(
+            {"candidate_id": self.candidate_id, "params": self.params}, sort_keys=True
+        )
 
 
 @dataclass(frozen=True)
 class InnerFold:
     """Represents a single inner fold within an outer-train window."""
+
     inner_idx: int
     train_start: int
     train_end: int
@@ -226,6 +262,7 @@ class InnerFold:
 @dataclass
 class TrialResult:
     """Result from evaluating a candidate on an inner fold."""
+
     outer_fold: int
     candidate_id: int
     inner_fold: int
@@ -238,6 +275,13 @@ class TrialResult:
     composite_score: float
     params_json: str
     resolved_params_json: str = ""  # Phase E: resolved key mappings
+    # Phase F: Explicit param columns for easy analysis
+    confidence_floor: float = 0.65
+    sigma_scale: float = 1.0
+    n_trades: int = 200
+    # Phase F: Conditional vs unconditional coverage
+    coverage_90_conditional: float = 0.0  # Same as coverage_90 (non-abstained only)
+    coverage_90_unconditional: float = 0.0  # Abstained counted as uncovered
 
 
 def _set_nested_key(d: dict, dotted_key: str, value: Any) -> None:
@@ -279,7 +323,9 @@ def _apply_candidate_params(
     return cfg, resolved_params
 
 
-def _interval_score(y: np.ndarray, lo: np.ndarray, hi: np.ndarray, alpha: float) -> np.ndarray:
+def _interval_score(
+    y: np.ndarray, lo: np.ndarray, hi: np.ndarray, alpha: float
+) -> np.ndarray:
     """Compute interval score (width + penalty for violations)."""
     y = np.asarray(y, dtype=float)
     lo = np.asarray(lo, dtype=float)
@@ -414,7 +460,9 @@ class RalphLoop:
             return base_features_df
 
         # Use cache to get features for this n_trades value
-        domain_config = self.base_config.get("domains", {"domains": {"D0": {"n_trades": 200}}})
+        domain_config = self.base_config.get(
+            "domains", {"domains": {"D0": {"n_trades": 200}}}
+        )
         models_config = self.base_config.get("models", {})
         horizon_bars = self.base_config.get("forecast", {}).get("horizon_bars", 10)
 
@@ -450,7 +498,9 @@ class RalphLoop:
         # Calculate so all folds fit within the window
         total_purge = purge * n_inner  # purge after each fold's train
         available_for_data = n_bars - total_purge
-        if available_for_data < n_inner * 15:  # Need at least 15 bars (10 train + 5 val) per fold
+        if (
+            available_for_data < n_inner * 15
+        ):  # Need at least 15 bars (10 train + 5 val) per fold
             return []
 
         # Divide available data among folds
@@ -474,29 +524,33 @@ class RalphLoop:
             if val_end > outer_train_end:
                 break
 
-            folds.append(InnerFold(
-                inner_idx=i,
-                train_start=train_start,
-                train_end=train_end,
-                val_start=val_start,
-                val_end=val_end,
-            ))
+            folds.append(
+                InnerFold(
+                    inner_idx=i,
+                    train_start=train_start,
+                    train_end=train_end,
+                    val_start=val_start,
+                    val_end=val_end,
+                )
+            )
 
         return folds
 
-    def _apply_sigma_scale(self, preds: pd.DataFrame, sigma_scale: float) -> pd.DataFrame:
+    def _apply_sigma_scale(
+        self, preds: pd.DataFrame, sigma_scale: float
+    ) -> pd.DataFrame:
         """Apply sigma_scale to widen/narrow prediction intervals."""
         if sigma_scale == 1.0:
             return preds
 
         result = preds.copy()
-        center = result['q50'] if 'q50' in result.columns else result.get('x_hat', 0.0)
-        half = (result['q95'] - result['q05']) / 2.0
+        center = result["q50"] if "q50" in result.columns else result.get("x_hat", 0.0)
+        half = (result["q95"] - result["q05"]) / 2.0
         half = half * sigma_scale
-        result['q05'] = center - half
-        result['q95'] = center + half
-        if 'sigma_hat' in result.columns:
-            result['sigma_hat'] = (result['q95'] - result['q05']) / 3.29
+        result["q05"] = center - half
+        result["q95"] = center + half
+        if "sigma_hat" in result.columns:
+            result["sigma_hat"] = (result["q95"] - result["q05"]) / 3.29
         return result
 
     def _apply_abstain_logic(
@@ -593,7 +647,9 @@ class RalphLoop:
         if not self._key_mappings_logged:
             mapped_keys = [k for k, v in resolved_params.items() if v.get("was_mapped")]
             if mapped_keys:
-                print(f"  Key mappings: {json.dumps({k: resolved_params[k]['resolved_key'] for k in mapped_keys})}")
+                print(
+                    f"  Key mappings: {json.dumps({k: resolved_params[k]['resolved_key'] for k in mapped_keys})}"
+                )
             self._key_mappings_logged = True
 
         models_cfg = cfg.get("models", {})
@@ -609,6 +665,10 @@ class RalphLoop:
             sigma_scale = float(candidate.params["forecast.sigma_scale"])
         elif "forecast" in cfg and "sigma_scale" in cfg["forecast"]:
             sigma_scale = float(cfg["forecast"]["sigma_scale"])
+
+        # PHASE F FIX: Use the MODIFIED regimes config from cfg, not the original
+        # This ensures confidence_floor from the grid is actually applied
+        modified_regimes_config = cfg.get("regimes", regimes_config)
 
         # Get inner train/val data (use candidate_features_df for structural params)
         # Adjust fold indices if candidate_features_df has different length
@@ -628,6 +688,14 @@ class RalphLoop:
         resolved_params_json = json.dumps(resolved_params, sort_keys=True)
 
         if len(train_df) < 10 or len(val_df) < 5:
+            # Phase F: Extract param values even for early returns
+            early_confidence_floor = float(
+                candidate.params.get("regimes.confidence_floor", 0.65)
+            )
+            early_sigma_scale = sigma_scale
+            early_n_trades = int(
+                candidate.params.get("domains.domains.D0.n_trades", 200)
+            )
             return TrialResult(
                 outer_fold=outer_fold_idx,
                 candidate_id=candidate.candidate_id,
@@ -641,6 +709,11 @@ class RalphLoop:
                 composite_score=999.0,
                 params_json=candidate.to_json(),
                 resolved_params_json=resolved_params_json,
+                confidence_floor=early_confidence_floor,
+                sigma_scale=early_sigma_scale,
+                n_trades=early_n_trades,
+                coverage_90_conditional=0.0,
+                coverage_90_unconditional=0.0,
             )
 
         # Fit predictor on inner train
@@ -661,11 +734,13 @@ class RalphLoop:
             outcomes = (train_labels == shifted).astype(float)
             calibrator.fit(train_s, outcomes)
 
-        # Apply abstain logic
-        preds = self._apply_abstain_logic(preds, val_df, regimes_config)
+        # Apply abstain logic using MODIFIED config (Phase F fix)
+        preds = self._apply_abstain_logic(preds, val_df, modified_regimes_config)
 
         # Score on non-abstained rows
-        non_abstain = preds[~preds["abstain"]].copy() if "abstain" in preds.columns else preds
+        non_abstain = (
+            preds[~preds["abstain"]].copy() if "abstain" in preds.columns else preds
+        )
 
         # Merge with actual targets for scoring
         if len(non_abstain) > 0:
@@ -681,7 +756,17 @@ class RalphLoop:
                 how="inner",
             )
 
+        # Phase F: Extract explicit param values for trial record
+        param_confidence_floor = float(
+            candidate.params.get("regimes.confidence_floor", 0.65)
+        )
+        param_sigma_scale = sigma_scale  # Already extracted above
+        param_n_trades = int(candidate.params.get("domains.domains.D0.n_trades", 200))
+
         # Compute metrics
+        coverage_90_conditional = 0.0
+        coverage_90_unconditional = 0.0
+
         if len(eval_df) > 0 and "future_return" in eval_df.columns:
             y_true = eval_df["future_return"].values
             valid_mask = ~np.isnan(y_true)
@@ -692,7 +777,17 @@ class RalphLoop:
                 q50 = eval_df["q50"].values[valid_mask]
                 q95 = eval_df["q95"].values[valid_mask]
 
+                # Phase F: Interval validity guard (lo <= hi)
+                invalid_intervals = np.sum(q05 > q95)
+                if invalid_intervals > 0:
+                    # Fix invalid intervals by swapping
+                    swap_mask = q05 > q95
+                    q05[swap_mask], q95[swap_mask] = q95[swap_mask], q05[swap_mask]
+
                 coverage_90 = float(coverage(y_true, q05, q95))
+                coverage_90_conditional = (
+                    coverage_90  # Same as coverage_90 for non-abstained
+                )
                 sharpness_val = float(sharpness(q05, q95))
                 mae = float(np.mean(np.abs(y_true - q50)))
 
@@ -705,7 +800,37 @@ class RalphLoop:
         else:
             coverage_90, sharpness_val, mae, wis, is90 = 0.0, 1.0, 1.0, 1.0, 1.0
 
-        abstention_rate = float(preds["abstain"].mean()) if "abstain" in preds.columns else 0.0
+        abstention_rate = (
+            float(preds["abstain"].mean()) if "abstain" in preds.columns else 0.0
+        )
+
+        # Phase F: Compute unconditional coverage (abstained counted as uncovered)
+        # Merge ALL predictions (including abstained) with targets
+        all_preds_with_targets = preds.merge(
+            val_df[["symbol", "bar_idx", "future_return"]],
+            on=["symbol", "bar_idx"],
+            how="inner",
+        )
+        if (
+            len(all_preds_with_targets) > 0
+            and "future_return" in all_preds_with_targets.columns
+        ):
+            y_all = all_preds_with_targets["future_return"].values
+            valid_all = ~np.isnan(y_all)
+            y_all = y_all[valid_all]
+
+            if len(y_all) > 0:
+                q05_all = all_preds_with_targets["q05"].values[valid_all]
+                q95_all = all_preds_with_targets["q95"].values[valid_all]
+                abstain_all = (
+                    all_preds_with_targets["abstain"].values[valid_all]
+                    if "abstain" in all_preds_with_targets.columns
+                    else np.zeros(len(y_all), dtype=bool)
+                )
+
+                # Unconditional: abstained rows count as NOT covered
+                in_interval = (y_all >= q05_all) & (y_all <= q95_all) & (~abstain_all)
+                coverage_90_unconditional = float(np.mean(in_interval))
 
         composite = self._compute_composite_score(
             coverage_90=coverage_90,
@@ -729,6 +854,11 @@ class RalphLoop:
             composite_score=composite,
             params_json=candidate.to_json(),
             resolved_params_json=resolved_params_json,
+            confidence_floor=param_confidence_floor,
+            sigma_scale=param_sigma_scale,
+            n_trades=param_n_trades,
+            coverage_90_conditional=coverage_90_conditional,
+            coverage_90_unconditional=coverage_90_unconditional,
         )
 
     def _select_best_for_outer_fold(
@@ -747,7 +877,9 @@ class RalphLoop:
             return best, []
 
         trials = []
-        candidate_scores: Dict[int, List[float]] = {c.candidate_id: [] for c in self.candidates}
+        candidate_scores: Dict[int, List[float]] = {
+            c.candidate_id: [] for c in self.candidates
+        }
 
         for cand in self.candidates:
             for inner in inner_folds:
@@ -764,7 +896,9 @@ class RalphLoop:
         # Select candidate with lowest mean composite score (lower is better)
         best_id = min(
             candidate_scores.keys(),
-            key=lambda cid: np.mean(candidate_scores[cid]) if candidate_scores[cid] else 999.0,
+            key=lambda cid: (
+                np.mean(candidate_scores[cid]) if candidate_scores[cid] else 999.0
+            ),
         )
         best = next(c for c in self.candidates if c.candidate_id == best_id)
         self.selected_params[outer_fold_idx] = best
@@ -791,7 +925,9 @@ class RalphLoop:
         np.random.seed(self.random_seed)
 
         # Sort for determinism
-        features_df = features_df.sort_values(["symbol", "bar_idx"]).reset_index(drop=True)
+        features_df = features_df.sort_values(["symbol", "bar_idx"]).reset_index(
+            drop=True
+        )
 
         all_trials: List[TrialResult] = []
 
@@ -811,23 +947,32 @@ class RalphLoop:
 
         # Build trials DataFrame
         if all_trials:
-            trials_df = pd.DataFrame([
-                {
-                    "outer_fold": t.outer_fold,
-                    "candidate_id": t.candidate_id,
-                    "inner_fold": t.inner_fold,
-                    "coverage_90": t.coverage_90,
-                    "sharpness": t.sharpness,
-                    "mae": t.mae,
-                    "wis": t.wis,
-                    "is90": t.is90,
-                    "abstention_rate": t.abstention_rate,
-                    "composite_score": t.composite_score,
-                    "params_json": t.params_json,
-                    "resolved_params_json": t.resolved_params_json,  # Phase E
-                }
-                for t in all_trials
-            ])
+            trials_df = pd.DataFrame(
+                [
+                    {
+                        "outer_fold": t.outer_fold,
+                        "candidate_id": t.candidate_id,
+                        "inner_fold": t.inner_fold,
+                        "coverage_90": t.coverage_90,
+                        "sharpness": t.sharpness,
+                        "mae": t.mae,
+                        "wis": t.wis,
+                        "is90": t.is90,
+                        "abstention_rate": t.abstention_rate,
+                        "composite_score": t.composite_score,
+                        "params_json": t.params_json,
+                        "resolved_params_json": t.resolved_params_json,  # Phase E
+                        # Phase F: Explicit param columns
+                        "confidence_floor": t.confidence_floor,
+                        "sigma_scale": t.sigma_scale,
+                        "n_trades": t.n_trades,
+                        # Phase F: Conditional vs unconditional coverage
+                        "coverage_90_conditional": t.coverage_90_conditional,
+                        "coverage_90_unconditional": t.coverage_90_unconditional,
+                    }
+                    for t in all_trials
+                ]
+            )
         else:
             trials_df = pd.DataFrame()
 
@@ -843,7 +988,9 @@ class RalphLoop:
         if self.selected_params:
             counts = Counter(c.candidate_id for c in self.selected_params.values())
             most_common_id = counts.most_common(1)[0][0]
-            global_best = next(c for c in self.candidates if c.candidate_id == most_common_id)
+            global_best = next(
+                c for c in self.candidates if c.candidate_id == most_common_id
+            )
             selected_json["global_best"] = {
                 "candidate_id": global_best.candidate_id,
                 "params": global_best.params,
@@ -872,16 +1019,18 @@ class RalphLoop:
         selected_trials = []
         for fold_idx, cand in self.selected_params.items():
             fold_trials = trials_df[
-                (trials_df["outer_fold"] == fold_idx) &
-                (trials_df["candidate_id"] == cand.candidate_id)
+                (trials_df["outer_fold"] == fold_idx)
+                & (trials_df["candidate_id"] == cand.candidate_id)
             ]
             if not fold_trials.empty:
-                selected_trials.append({
-                    "outer_fold": fold_idx,
-                    "coverage_90": fold_trials["coverage_90"].mean(),
-                    "sharpness": fold_trials["sharpness"].mean(),
-                    "mae": fold_trials["mae"].mean(),
-                })
+                selected_trials.append(
+                    {
+                        "outer_fold": fold_idx,
+                        "coverage_90": fold_trials["coverage_90"].mean(),
+                        "sharpness": fold_trials["sharpness"].mean(),
+                        "mae": fold_trials["mae"].mean(),
+                    }
+                )
 
         if not selected_trials:
             return {

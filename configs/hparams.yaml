@@ -11,18 +11,17 @@ ralph_loop:
     mae: 1.0
     abstention: 0.5
 
-  # cartesian product grid (3*3*2*2 = 36 combos)
-  # Phase E: supports structural params (D0.n_trades) with caching
+  # Phase F: Reduced grid to stay under 40 combos (2*2*8 = 32)
+  # Focus on sigma_scale exploration which is critical for coverage target
   grid:
-    # REAL structural knob: D0 aggregation size (with caching)
-    domains.domains.D0.n_trades: [100, 200, 300]
+    # Structural knob: D0 aggregation size (with caching)
+    domains.domains.D0.n_trades: [100, 200]
 
-    # Abstain knobs (mapped to actual config paths via key-path mapping)
-    # regimes.confidence_floor -> regimes.constraints_by_species.default.confidence_floor
-    regimes.confidence_floor: [0.45, 0.55, 0.65]
+    # Abstain threshold (mapped to regimes.constraints_by_species.default.confidence_floor)
+    regimes.confidence_floor: [0.50, 0.60]
 
-    # Interval scaling (applied post-prediction)
-    forecast.sigma_scale: [1.00, 1.15]
+    # Interval scaling - EXPANDED to reach 90% coverage target
+    forecast.sigma_scale: [1.0, 1.15, 1.3, 1.5, 1.8, 2.2, 2.8, 3.5]
 
     # NOTE: models.predictor.sigma_floor is reserved for future use
     # (not currently implemented in QuantilePredictor)

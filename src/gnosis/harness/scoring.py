@@ -1,6 +1,31 @@
 """Scoring and calibration metrics."""
+
 import numpy as np
 import pandas as pd
+from typing import List
+
+
+def _drop_future_return_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure we NEVER carry truth columns inside predictions until the single attach-truth step.
+    This prevents pandas from creating future_return_x / future_return_y during merges.
+    """
+    cols = [c for c in df.columns if c.startswith("future_return")]
+    if cols:
+        return df.drop(columns=cols, errors="ignore")
+    return df
+
+
+def _safe_merge_no_truth(
+    left: pd.DataFrame, right: pd.DataFrame, on: List[str], how: str = "left"
+) -> pd.DataFrame:
+    """
+    Merge right into left but *force* right to not contribute any future_return* columns.
+    """
+    right = right[[c for c in right.columns if not c.startswith("future_return")]]
+    return left.merge(right, on=on, how=how)
+
+
 from typing import Dict, List, Tuple, Optional
 
 
@@ -44,7 +69,7 @@ def evaluate_predictions(
     merged = predictions_df.merge(
         actuals_df[["symbol", "bar_idx", target_col]],
         on=["symbol", "bar_idx"],
-        how="inner"
+        how="inner",
     )
 
     y_true = merged[target_col].values
@@ -202,11 +227,7 @@ def compute_ece(probs: np.ndarray, outcomes: np.ndarray, n_bins: int = 10) -> Di
         Dictionary with ECE and bin-level diagnostics
     """
     if len(probs) == 0:
-        return {
-            "ece": 0.0,
-            "n_bins": n_bins,
-            "bins": []
-        }
+        return {"ece": 0.0, "n_bins": n_bins, "bins": []}
 
     bins = []
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
@@ -228,25 +249,29 @@ def compute_ece(probs: np.ndarray, outcomes: np.ndarray, n_bins: int = 10) -> Di
             weighted_error += n_in_bin * bin_error
             total_weight += n_in_bin
 
-            bins.append({
-                "bin_idx": i,
-                "bin_start": float(bin_edges[i]),
-                "bin_end": float(bin_edges[i + 1]),
-                "n_samples": int(n_in_bin),
-                "avg_predicted_prob": float(avg_prob),
-                "avg_actual_freq": float(avg_outcome),
-                "calibration_error": float(bin_error)
-            })
+            bins.append(
+                {
+                    "bin_idx": i,
+                    "bin_start": float(bin_edges[i]),
+                    "bin_end": float(bin_edges[i + 1]),
+                    "n_samples": int(n_in_bin),
+                    "avg_predicted_prob": float(avg_prob),
+                    "avg_actual_freq": float(avg_outcome),
+                    "calibration_error": float(bin_error),
+                }
+            )
         else:
-            bins.append({
-                "bin_idx": i,
-                "bin_start": float(bin_edges[i]),
-                "bin_end": float(bin_edges[i + 1]),
-                "n_samples": 0,
-                "avg_predicted_prob": float((bin_edges[i] + bin_edges[i + 1]) / 2),
-                "avg_actual_freq": None,
-                "calibration_error": None
-            })
+            bins.append(
+                {
+                    "bin_idx": i,
+                    "bin_start": float(bin_edges[i]),
+                    "bin_end": float(bin_edges[i + 1]),
+                    "n_samples": 0,
+                    "avg_predicted_prob": float((bin_edges[i] + bin_edges[i + 1]) / 2),
+                    "avg_actual_freq": None,
+                    "calibration_error": None,
+                }
+            )
 
     ece = weighted_error / total_weight if total_weight > 0 else 0.0
 
@@ -254,7 +279,7 @@ def compute_ece(probs: np.ndarray, outcomes: np.ndarray, n_bins: int = 10) -> Di
         "ece": float(ece),
         "n_bins": n_bins,
         "n_samples": int(total_weight),
-        "bins": bins
+        "bins": bins,
     }
 
 
