@@ -1,6 +1,7 @@
 """Backtest orchestration."""
 import json
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -140,9 +141,9 @@ class BacktestRunner:
             if pending_order is not None:
                 # Fill at CURRENT bar's close (this was decided on PREVIOUS bar)
                 # Verify we're filling at bar_idx > decision_bar_idx (no same-bar fill)
-                assert current_bar_idx > pending_order.decision_bar_idx, (
-                    f"Same-bar fill detected: decision_bar={pending_order.decision_bar_idx}, "
-                    f"fill_bar={current_bar_idx}"
+                assert current_bar_idx == pending_order.decision_bar_idx + 1, (
+                    f"Fill must be exactly next-bar to avoid leakage/gaps: "
+                    f"decision_bar={pending_order.decision_bar_idx}, fill_bar={current_bar_idx}"
                 )
 
                 fill = self.executor.execute(
@@ -194,11 +195,30 @@ class BacktestRunner:
             # Create pending order if trade needed (will execute on NEXT bar)
             if abs(trade_qty) > MIN_TRADE_SIZE:
                 side = "BUY" if trade_qty > 0 else "SELL"
+                qty = abs(trade_qty)
+                # Cash-only (spot) clamp: prevent BUY from exceeding available cash (fees+spread+slip+buffer)
+                if side == "BUY":
+                    exec_cfg = self.executor.config
+                    fee_rate = exec_cfg.fee_bps / 10000.0
+                    buffer_bps = float(getattr(self.config.position, "cost_buffer_bps", 0.0))
+                    all_in_bps = float(exec_cfg.spread_bps) + float(exec_cfg.slippage_bps) + max(0.0, buffer_bps)
+                    est_price = float(current_price) * (1.0 + all_in_bps / 10000.0)
+                    denom = est_price * (1.0 + fee_rate)
+                    cash = float(portfolio.cash)
+                    if (not isfinite(cash)) or cash <= 0 or (not isfinite(denom)) or denom <= 0:
+                        continue
+                    max_qty = cash / denom
+                    if max_qty <= 0:
+                        continue
+                    qty = min(qty, max_qty)
+                if qty <= MIN_TRADE_SIZE:
+                    continue
+
                 pending_order = PendingOrder(
                     decision_bar_idx=current_bar_idx,
                     symbol=symbol,
                     side=side,
-                    quantity=abs(trade_qty),
+                    quantity=qty,
                     volatility=volatility,
                 )
 
