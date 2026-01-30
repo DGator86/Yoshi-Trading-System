@@ -43,9 +43,8 @@ models:
   predictor:
     sigma_scale: 2.86
 domains:
-  domains:
-    D0:
-      n_trades: 100
+  D0:
+    n_trades: 100
 regimes:
   constraints_by_species:
     default:
