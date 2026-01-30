@@ -537,16 +537,15 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
                 break
         if _y_src is not None:
             _pred_out = _drop_future_return_cols(_pred_out)
-_y_src = _y_src[["symbol", "bar_idx", "future_return"]]
-_pred_out = _pred_out.merge(
-    _y_src,
-    on=["symbol", "bar_idx"],
-    how="left",
-    validate="m:1",
-)
-assert "future_return" in _pred_out.columns
-assert not any(c in _pred_out.columns for c in ("future_return_x", "future_return_y"))
-
+            _y_src = _y_src[["symbol", "bar_idx", "future_return"]]
+            _pred_out = _pred_out.merge(
+                _y_src,
+                on=["symbol", "bar_idx"],
+                how="left",
+                validate="m:1",
+            )
+            assert "future_return" in _pred_out.columns
+            assert not any(c in _pred_out.columns for c in ("future_return_x", "future_return_y"))
         else:            # If we can't find y_true in locals, keep artifact as-is.
             pass
         # --- end inject ---
@@ -576,10 +575,10 @@ assert not any(c in _pred_out.columns for c in ("future_return_x", "future_retur
                     _bars = _bars.sort_values(['symbol','bar_idx']).reset_index(drop=True)
                     _bars = _compute_future_returns(_bars, horizon_bars=_cfgH)
                     _bars = _bars[['symbol','bar_idx','future_return']].copy()
-_preds = _drop_future_return_cols(_preds)
-_preds = _safe_merge_no_truth(_preds, _bars, on=["symbol", "bar_idx"], how="left")
-assert not any(c.startswith("future_return") for c in _preds.columns), \
-    f"BUG: future_return leaked into _preds via _bars merge: {[c for c in _preds.columns if c.startswith('future_return')]}"
+                    _preds = _drop_future_return_cols(_preds)
+                    _preds = _safe_merge_no_truth(_preds, _bars, on=["symbol", "bar_idx"], how="left")
+                    assert not any(c.startswith("future_return") for c in _preds.columns), \
+                        f"BUG: future_return leaked into _preds via _bars merge: {[c for c in _preds.columns if c.startswith('future_return')]}"
 
                     # Stable ordering for determinism
                     if 'symbol' in _preds.columns and 'bar_idx' in _preds.columns:
