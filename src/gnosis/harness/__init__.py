@@ -10,6 +10,7 @@ from .scoring import (
     compute_ece,
     compute_stability_metrics,
 )
+from .ralph_loop import RalphLoop, RalphLoopConfig
 
 __all__ = [
     "WalkForwardHarness",
@@ -23,6 +24,8 @@ __all__ = [
     "IsotonicCalibrator",
     "compute_ece",
     "compute_stability_metrics",
+    "RalphLoop",
+    "RalphLoopConfig",
 ]
 
 from .trade_walkforward import TradeWalkForwardHarness, TradeFold

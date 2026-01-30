@@ -1,36 +1,23 @@
-# Hyperparameter search grid for Ralph Loop (Phase D)
-# Keep small: 10-40 combinations total
+ralph:
+  enabled: true
 
-# Grid candidates for nested walk-forward selection
-grid:
-  # Domain D0 n_trades: bar aggregation size
-  domains_D0_n_trades: [100, 200, 400]
+  # inner selection targets
+  target_coverage: 0.90
 
-  # Predictor L2 regularization
-  predictor_l2_reg: [0.1, 1.0, 10.0]
+  # weights for composite score (lower is better)
+  weights:
+    coverage: 4.0
+    wis: 1.0
+    is90: 0.5
+    mae: 1.0
+    abstention: 0.5
 
-  # Confidence floor scaling factor (applied to default 0.65)
-  confidence_floor_scale: [0.6, 0.8, 1.0]
+  # inner CV config
+  inner_folds: 3
+  purge_bars: 10
+  embargo_bars: 10
 
-  # Particle flow EWM span (smoothing window)
-  particle_flow_span: [5, 10, 20]
-
-# Inner fold configuration for hyperparameter selection
-inner_folds:
-  n_folds: 3  # Number of inner folds per outer fold
-  train_ratio: 0.6  # Fraction of outer-train for inner-train
-  val_ratio: 0.4    # Fraction of outer-train for inner-val
-
-# Composite score weights for param selection
-# Higher is better: score = w1*(1-|coverage_error|) - w2*sharpness - w3*mae - w4*abstention - w5*flip_rate
-scoring_weights:
-  coverage_target: 0.90  # Target coverage for 90% interval
-  w1_coverage: 2.0       # Weight for coverage closeness to target
-  w2_sharpness: 1.0      # Weight for sharpness (lower is better)
-  w3_mae: 0.5            # Weight for MAE (lower is better)
-  w4_abstention: 0.3     # Weight for abstention rate (lower is better)
-  w5_flip_rate: 0.2      # Weight for regime flip rate (lower is better)
-
-# Purge/embargo for inner splits (in bars)
-inner_purge_bars: 5
-inner_embargo_bars: 5
+  # candidate grid (cartesian product <= 40 combos)
+  grid:
+    forecast.sigma_scale: [1.00, 1.15, 1.30]
+    forecast.residual_calibration.clip_hi: [0.02, 0.03, 0.04]

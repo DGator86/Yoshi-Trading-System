@@ -27,7 +27,16 @@ forecast:
     - sharpness
     - mae
   horizon_bars: 9
-  sigma_scale: 2.6
+  sigma_scale: 1.0
+  residual_calibration:
+    enabled: true
+    alpha: 0.1
+    cal_frac: 0.2
+    min_cal: 50
+    method: quantile
+    ewma_lambda: 0.35
+    clip_lo: 0.0
+    clip_hi: 0.08
 artifacts:
   out_dir: reports/latest
 models:

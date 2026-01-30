@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 import pandas as pd
+from gnosis.calibration.residual import ResidualCalibSpec, split_fit_cal, fit_delta_symmetric, apply_delta_symmetric
+
 import numpy as np
 from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
 
@@ -29,11 +31,10 @@ from gnosis.harness import (
     IsotonicCalibrator,
     compute_ece,
     compute_stability_metrics,
-    RalphLoop,
-    RalphLoopConfig,
 )
 from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
 from gnosis.registry import FeatureRegistry
+from gnosis.loop import RalphLoop, RalphLoopConfig
 import os
 
 
@@ -214,7 +215,7 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
     selected_hparams_per_fold = {}
     if hparams_config is not None:
         print("Running Ralph Loop for hyperparameter selection...")
-        ralph_loop_config = RalphLoopConfig.from_dict(hparams_config)
+        ralph_loop_config = RalphLoopConfig.from_yaml(hparams_config)
         ralph = RalphLoop(
             loop_config=ralph_loop_config,
             base_config=config,
@@ -274,8 +275,39 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
         fold_predictor = QuantilePredictor(fold_models_config)
 
         # Fit and predict
-        fold_predictor.fit(train_df, "future_return")
+        # --- Residual calibration (time-ordered; symmetric interval)
+        rc_cfg = (config.get("forecast", {}) or {}).get("residual_calibration", {})
+        rc = ResidualCalibSpec(
+            enabled=bool(rc_cfg.get("enabled", True)),
+            alpha=float(rc_cfg.get("alpha", 0.10)),
+            cal_frac=float(rc_cfg.get("cal_frac", 0.20)),
+            min_cal=int(rc_cfg.get("min_cal", 50)),
+            ewma_lambda=float(rc_cfg.get("ewma_lambda", 0.35)),
+            method=str(rc_cfg.get("method", "quantile")),
+            clip_lo=float(rc_cfg.get("clip_lo", 0.0)),
+            clip_hi=float(rc_cfg.get("clip_hi", 0.10)),
+        )
+
+        fit_df, cal_df = (train_df, None)
+        if rc.enabled:
+            fit_df, cal_df = split_fit_cal(train_df, rc.cal_frac, rc.min_cal)
+
+        fold_predictor.fit(fit_df, "future_return")
         preds = fold_predictor.predict(test_df)
+
+        if rc.enabled and (cal_df is not None) and ("future_return" in cal_df.columns) and (len(cal_df) > 0):
+            cal_preds = fold_predictor.predict(cal_df)
+            delta = fit_delta_symmetric(
+                y_true=cal_df["future_return"].values,
+                q50=cal_preds["q50"].values,
+                alpha=rc.alpha,
+                method=rc.method,
+                ewma_lambda=rc.ewma_lambda,
+                clip_lo=rc.clip_lo,
+                clip_hi=rc.clip_hi,
+            )
+            preds = apply_delta_symmetric(preds, delta)
+
         preds["fold"] = fold.fold_idx
         # SIGMA_SCALE_RUN_EXPERIMENT
         # Apply config-driven interval widening AFTER prediction, BEFORE abstain/scoring.
