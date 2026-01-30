@@ -374,3 +374,43 @@ class TestOutputFormat:
         # Should have same shape as original
         pd.testing.assert_frame_equal(trades, result.trades_df)
         pd.testing.assert_frame_equal(equity, result.equity_curve)
+
+
+def test_cash_never_negative_cash_only():
+    """Spot cash-only invariant: cash must never go negative."""
+    from gnosis.backtest.runner import BacktestConfig, BacktestRunner
+    from gnosis.backtest.execution import ExecutionConfig
+    from gnosis.backtest.signals import SignalConfig
+    from gnosis.backtest.positions import PositionConfig
+
+    n = 60
+    rows = []
+    for sym in ["AAA", "BBB"]:
+        price = 100.0
+        for i in range(n):
+            price += 0.25
+            rows.append(
+                {
+                    "symbol": sym,
+                    "bar_idx": i,
+                    "timestamp_end": pd.Timestamp("2024-01-01") + pd.Timedelta(minutes=i),
+                    "close": price,
+                    "x_hat": 0.01 if (i % 2 == 0) else -0.01,
+                    "sigma_hat": 0.0,
+                    "abstain": 0,
+                }
+            )
+    df = pd.DataFrame(rows)
+
+    cfg = BacktestConfig(
+        initial_capital=10000.0,
+        random_seed=1337,
+        signal=SignalConfig(mode="x_hat_threshold", long_threshold=0.0, use_abstain=True, min_confidence=0.0),
+        position=PositionConfig(mode="fixed_pct", equity_pct=1.0, long_only=True),
+        execution=ExecutionConfig(fee_bps=7.5, spread_bps=2.0, slippage_bps=0.0),
+    )
+    runner = BacktestRunner(cfg)
+    result = runner.run(df)
+
+    cash_min = float(result.equity_curve["cash"].min())
+    assert cash_min >= -1e-6, f"cash went negative: min_cash={cash_min}"
