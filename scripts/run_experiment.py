@@ -215,10 +215,12 @@ def run_experiment(config: dict, config_path: str = "configs/experiment.yaml", h
     if hparams_config is not None:
         print("Running Ralph Loop for hyperparameter selection...")
         ralph_loop_config = RalphLoopConfig.from_dict(hparams_config)
+        # Phase E: Pass prints_df to support structural hyperparameters
         ralph = RalphLoop(
             loop_config=ralph_loop_config,
             base_config=config,
             random_seed=config.get("random_seed", 1337),
+            prints_df=prints_df,  # Enables D0.n_trades variation with caching
         )
 
         wf_config = config.get("walkforward", {})

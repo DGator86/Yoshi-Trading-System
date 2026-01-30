@@ -1,10 +1,9 @@
-ralph:
+ralph_loop:
   enabled: true
-
-  # inner selection targets
   target_coverage: 0.90
-
-  # weights for composite score (lower is better)
+  inner_folds: 3
+  purge_bars: 10
+  embargo_bars: 10
   weights:
     coverage: 4.0
     wis: 1.0
@@ -12,12 +11,18 @@ ralph:
     mae: 1.0
     abstention: 0.5
 
-  # inner CV config
-  inner_folds: 3
-  purge_bars: 10
-  embargo_bars: 10
-
-  # candidate grid (cartesian product <= 40 combos)
+  # cartesian product grid (3*3*2*2 = 36 combos)
+  # Phase E: supports structural params (D0.n_trades) with caching
   grid:
-    forecast.sigma_scale: [1.00, 1.15, 1.30]
-    forecast.residual_calibration.clip_hi: [0.02, 0.03, 0.04]
+    # REAL structural knob: D0 aggregation size (with caching)
+    domains.domains.D0.n_trades: [100, 200, 300]
+
+    # Abstain knobs (mapped to actual config paths via key-path mapping)
+    # regimes.confidence_floor -> regimes.constraints_by_species.default.confidence_floor
+    regimes.confidence_floor: [0.45, 0.55, 0.65]
+
+    # Interval scaling (applied post-prediction)
+    forecast.sigma_scale: [1.00, 1.15]
+
+    # NOTE: models.predictor.sigma_floor is reserved for future use
+    # (not currently implemented in QuantilePredictor)

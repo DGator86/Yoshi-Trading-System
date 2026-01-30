@@ -7,6 +7,7 @@ Ralph Loop: Nested walk-forward hyperparameter selection with NO leakage.
 - Candidate search is a SMALL explicit grid (<= 40 combos)
 - Selection objective uses proper scoring (WIS/IS90/MAE) + coverage penalty + abstention penalty
 - NEVER use outer test for selection.
+- Phase E: Supports structural hyperparameters (D0.n_trades) with caching.
 """
 
 from __future__ import annotations
@@ -30,6 +31,118 @@ from gnosis.harness.scoring import (
     coverage,
     sharpness,
 )
+
+
+# ============================================================================
+# KEY-PATH MAPPING: Maps hparams.yaml keys to actual config paths
+# ============================================================================
+HPARAM_KEY_MAP: Dict[str, str] = {
+    # sigma_floor is not implemented in QuantilePredictor; treat as no-op or alias
+    "models.predictor.sigma_floor": "models.predictor.sigma_floor",  # kept for logging
+    # regimes.confidence_floor -> constraints_by_species.default.confidence_floor
+    "regimes.confidence_floor": "regimes.constraints_by_species.default.confidence_floor",
+    # These map directly (no change needed, but explicit for documentation)
+    "forecast.sigma_scale": "forecast.sigma_scale",
+    "domains.domains.D0.n_trades": "domains.domains.D0.n_trades",
+}
+
+
+def _resolve_hparam_key(key: str) -> Tuple[str, bool]:
+    """Resolve a hparam key to its actual config path.
+
+    Returns: (resolved_key, was_mapped)
+    """
+    if key in HPARAM_KEY_MAP:
+        resolved = HPARAM_KEY_MAP[key]
+        return resolved, resolved != key
+    return key, False
+
+
+# ============================================================================
+# FEATURE CACHE: Caches aggregated bars and features by n_trades
+# ============================================================================
+class FeatureCacheManager:
+    """Caches aggregated D0 bars and computed features by n_trades value.
+
+    This avoids recomputing aggregation and features for the same n_trades
+    across multiple candidate evaluations in the Ralph Loop.
+    """
+
+    def __init__(self):
+        self._cache: Dict[int, pd.DataFrame] = {}
+        self._hits: int = 0
+        self._misses: int = 0
+
+    def get_or_compute(
+        self,
+        prints_df: pd.DataFrame,
+        n_trades: int,
+        domain_config: dict,
+        regimes_config: dict,
+        models_config: dict,
+        horizon_bars: int = 10,
+    ) -> pd.DataFrame:
+        """Get features_df from cache or compute fresh.
+
+        Args:
+            prints_df: Raw print/trade data
+            n_trades: D0 aggregation size
+            domain_config: Domain configuration dict
+            regimes_config: Regimes configuration dict
+            models_config: Models configuration dict
+            horizon_bars: Forecast horizon for future_return
+
+        Returns:
+            features_df with all features and future_return target
+        """
+        if n_trades in self._cache:
+            self._hits += 1
+            return self._cache[n_trades].copy()
+
+        self._misses += 1
+
+        # Lazy imports to avoid circular dependencies
+        from gnosis.domains import DomainAggregator, compute_features
+        from gnosis.regimes import KPCOFGSClassifier
+        from gnosis.particle import ParticleState
+
+        # Build domain config with overridden n_trades
+        cfg = copy.deepcopy(domain_config)
+        cfg["domains"]["D0"]["n_trades"] = n_trades
+
+        # 1. Aggregate prints into D0 bars
+        aggregator = DomainAggregator(cfg)
+        bars_df = aggregator.aggregate(prints_df, "D0")
+
+        # 2. Compute basic features
+        features_df = compute_features(bars_df)
+
+        # 3. Classify regimes
+        classifier = KPCOFGSClassifier(regimes_config)
+        features_df = classifier.classify(features_df)
+
+        # 4. Compute particle state
+        particle = ParticleState(models_config)
+        features_df = particle.compute_state(features_df)
+
+        # 5. Compute future returns (target)
+        features_df = compute_future_returns(features_df, horizon_bars=horizon_bars)
+
+        # Sort for determinism
+        features_df = features_df.sort_values(["symbol", "bar_idx"]).reset_index(drop=True)
+
+        # Cache the result
+        self._cache[n_trades] = features_df.copy()
+
+        return features_df
+
+    def stats(self) -> dict:
+        """Return cache statistics."""
+        return {
+            "cache_hits": self._hits,
+            "cache_misses": self._misses,
+            "cached_n_trades_values": list(self._cache.keys()),
+        }
 
 
 @dataclass
@@ -60,13 +173,15 @@ class RalphLoopConfig:
     def from_dict(cls, d: dict) -> "RalphLoopConfig":
         """Create RalphLoopConfig from a dictionary.
 
-        Supports both top-level keys and nested under 'ralph' key.
+        Supports both top-level keys and nested under 'ralph' or 'ralph_loop' key.
         """
         if d is None:
             return cls()
 
-        # Support either top-level or nested under 'ralph'
-        if "ralph" in d:
+        # Support top-level, nested under 'ralph', or nested under 'ralph_loop'
+        if "ralph_loop" in d:
+            cfg = d["ralph_loop"]
+        elif "ralph" in d:
             cfg = d["ralph"]
         else:
             cfg = d
@@ -122,6 +237,7 @@ class TrialResult:
     abstention_rate: float
     composite_score: float
     params_json: str
+    resolved_params_json: str = ""  # Phase E: resolved key mappings
 
 
 def _set_nested_key(d: dict, dotted_key: str, value: Any) -> None:
@@ -132,12 +248,35 @@ def _set_nested_key(d: dict, dotted_key: str, value: Any) -> None:
     d[parts[-1]] = value
 
 
-def _apply_candidate_params(candidate: HparamCandidate, base_cfg: dict) -> dict:
-    """Apply candidate hyperparameters to a deep copy of base config."""
+def _apply_candidate_params(
+    candidate: HparamCandidate,
+    base_cfg: dict,
+) -> Tuple[dict, dict]:
+    """Apply candidate hyperparameters to a deep copy of base config.
+
+    Phase E: Uses key-path mapping for hparam keys that don't exist exactly.
+
+    Returns:
+        cfg: Config with applied hyperparameters
+        resolved_params: Dict mapping original keys to resolved keys and values
+    """
     cfg = copy.deepcopy(base_cfg)
+    resolved_params: Dict[str, Any] = {}
+
     for key, value in candidate.params.items():
-        _set_nested_key(cfg, key, value)
-    return cfg
+        resolved_key, was_mapped = _resolve_hparam_key(key)
+
+        # Log the mapping
+        resolved_params[key] = {
+            "resolved_key": resolved_key,
+            "value": value,
+            "was_mapped": was_mapped,
+        }
+
+        # Apply to config
+        _set_nested_key(cfg, resolved_key, value)
+
+    return cfg, resolved_params
 
 
 def _interval_score(y: np.ndarray, lo: np.ndarray, hi: np.ndarray, alpha: float) -> np.ndarray:
@@ -187,6 +326,7 @@ class RalphLoop:
     - Evaluates all candidates on inner folds
     - Selects best candidate per outer fold (never touches outer test)
     - Returns trials_df and selected_json for artifacts
+    - Phase E: Supports structural hyperparameters (D0.n_trades) with caching
     """
 
     def __init__(
@@ -194,14 +334,25 @@ class RalphLoop:
         loop_config: RalphLoopConfig,
         base_config: dict,
         random_seed: int = 1337,
+        prints_df: Optional[pd.DataFrame] = None,
     ):
         self.loop_config = loop_config
         self.base_config = base_config
         self.random_seed = random_seed
+        self.prints_df = prints_df
+
+        # Phase E: Feature cache for structural hyperparameters
+        self._feature_cache = FeatureCacheManager()
+        self._key_mappings_logged = False  # Log mappings once
 
         # Generate candidate grid
         self.candidates = self._generate_candidates()
         self.selected_params: Dict[int, HparamCandidate] = {}
+
+        # Detect if grid contains structural params (n_trades)
+        self._has_structural_params = any(
+            "n_trades" in key for key in self.loop_config.grid.keys()
+        )
 
     def _generate_candidates(self) -> List[HparamCandidate]:
         """Generate Cartesian product of grid parameters."""
@@ -218,6 +369,63 @@ class RalphLoop:
             params = {k: combo[j] for j, k in enumerate(keys)}
             candidates.append(HparamCandidate(candidate_id=i, params=dict(params)))
         return candidates
+
+    def _get_features_for_candidate(
+        self,
+        candidate: HparamCandidate,
+        base_features_df: pd.DataFrame,
+        regimes_config: dict,
+    ) -> pd.DataFrame:
+        """Get features_df for a candidate, using cache for structural params.
+
+        If the candidate includes D0.n_trades override and prints_df is available,
+        recompute features using the cache. Otherwise, return base_features_df.
+
+        Args:
+            candidate: HparamCandidate with params
+            base_features_df: Pre-computed features_df (used if no structural override)
+            regimes_config: Regimes configuration dict
+
+        Returns:
+            features_df appropriate for this candidate
+        """
+        # Check if candidate has n_trades override
+        n_trades_key = "domains.domains.D0.n_trades"
+        if n_trades_key not in candidate.params:
+            return base_features_df
+
+        n_trades = int(candidate.params[n_trades_key])
+
+        # Check if we can use cached/recomputed features
+        if self.prints_df is None:
+            # Fall back to base features if prints_df not provided
+            return base_features_df
+
+        # Get default n_trades from base config
+        default_n_trades = (
+            self.base_config.get("domains", {})
+            .get("domains", {})
+            .get("D0", {})
+            .get("n_trades", 200)
+        )
+
+        if n_trades == default_n_trades:
+            # No change needed, use base features
+            return base_features_df
+
+        # Use cache to get features for this n_trades value
+        domain_config = self.base_config.get("domains", {"domains": {"D0": {"n_trades": 200}}})
+        models_config = self.base_config.get("models", {})
+        horizon_bars = self.base_config.get("forecast", {}).get("horizon_bars", 10)
+
+        return self._feature_cache.get_or_compute(
+            prints_df=self.prints_df,
+            n_trades=n_trades,
+            domain_config=domain_config,
+            regimes_config=regimes_config,
+            models_config=models_config,
+            horizon_bars=horizon_bars,
+        )
 
     def _generate_inner_folds(
         self,
@@ -379,8 +587,21 @@ class RalphLoop:
         # Lazy import to avoid circular dependency
         from gnosis.predictors import QuantilePredictor
 
-        cfg = _apply_candidate_params(candidate, self.base_config)
+        cfg, resolved_params = _apply_candidate_params(candidate, self.base_config)
+
+        # Log key mappings once
+        if not self._key_mappings_logged:
+            mapped_keys = [k for k, v in resolved_params.items() if v.get("was_mapped")]
+            if mapped_keys:
+                print(f"  Key mappings: {json.dumps({k: resolved_params[k]['resolved_key'] for k in mapped_keys})}")
+            self._key_mappings_logged = True
+
         models_cfg = cfg.get("models", {})
+
+        # Phase E: Get features_df for this candidate (may differ by n_trades)
+        candidate_features_df = self._get_features_for_candidate(
+            candidate, features_df, regimes_config
+        )
 
         # Extract sigma_scale from candidate params or config
         sigma_scale = 1.0
@@ -389,13 +610,22 @@ class RalphLoop:
         elif "forecast" in cfg and "sigma_scale" in cfg["forecast"]:
             sigma_scale = float(cfg["forecast"]["sigma_scale"])
 
-        # Get inner train/val data
-        train_df = features_df.iloc[inner_fold.train_start:inner_fold.train_end].copy()
-        val_df = features_df.iloc[inner_fold.val_start:inner_fold.val_end].copy()
+        # Get inner train/val data (use candidate_features_df for structural params)
+        # Adjust fold indices if candidate_features_df has different length
+        n_rows = len(candidate_features_df)
+        train_start = min(inner_fold.train_start, n_rows - 1)
+        train_end = min(inner_fold.train_end, n_rows)
+        val_start = min(inner_fold.val_start, n_rows - 1)
+        val_end = min(inner_fold.val_end, n_rows)
+
+        train_df = candidate_features_df.iloc[train_start:train_end].copy()
+        val_df = candidate_features_df.iloc[val_start:val_end].copy()
 
         # Drop NaN targets
         train_df = train_df.dropna(subset=["future_return"])
         val_df = val_df.dropna(subset=["future_return"])
+
+        resolved_params_json = json.dumps(resolved_params, sort_keys=True)
 
         if len(train_df) < 10 or len(val_df) < 5:
             return TrialResult(
@@ -410,6 +640,7 @@ class RalphLoop:
                 abstention_rate=1.0,
                 composite_score=999.0,
                 params_json=candidate.to_json(),
+                resolved_params_json=resolved_params_json,
             )
 
         # Fit predictor on inner train
@@ -497,6 +728,7 @@ class RalphLoop:
             abstention_rate=abstention_rate,
             composite_score=composite,
             params_json=candidate.to_json(),
+            resolved_params_json=resolved_params_json,
         )
 
     def _select_best_for_outer_fold(
@@ -592,6 +824,7 @@ class RalphLoop:
                     "abstention_rate": t.abstention_rate,
                     "composite_score": t.composite_score,
                     "params_json": t.params_json,
+                    "resolved_params_json": t.resolved_params_json,  # Phase E
                 }
                 for t in all_trials
             ])
@@ -616,6 +849,13 @@ class RalphLoop:
                 "params": global_best.params,
                 "selection_count": counts[most_common_id],
             }
+
+        # Phase E: Add cache stats and key mapping info
+        selected_json["phase_e_info"] = {
+            "feature_cache_stats": self._feature_cache.stats(),
+            "key_mappings": HPARAM_KEY_MAP,
+            "has_structural_params": self._has_structural_params,
+        }
 
         return trials_df, selected_json
 
