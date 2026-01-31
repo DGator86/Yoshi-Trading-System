@@ -3,6 +3,50 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple
 
+# =============================================================================
+# Classification Constants
+# =============================================================================
+
+# Temperature for softmax (lower = sharper probability distributions)
+DEFAULT_TEMPERATURE = 2.0
+
+# Kinetics (K-level) thresholds
+# K_TRENDING: |returns| > vol * K_TRENDING_VOL_MULT
+# K_MEAN_REVERTING: |returns| < vol * K_MEAN_REV_VOL_MULT
+K_TRENDING_VOL_MULT = 1.5
+K_MEAN_REV_VOL_MULT = 0.5
+
+# Pressure (P-level) thresholds
+# P_VOL_EXPANDING: vol > vol_prev * P_VOL_EXPAND_MULT
+# P_VOL_CONTRACTING: vol < vol_prev * P_VOL_CONTRACT_MULT
+P_VOL_EXPAND_MULT = 1.2
+P_VOL_CONTRACT_MULT = 0.8
+
+# Current (C-level) thresholds
+# Buy/Sell flow dominant when |ofi| exceeds this threshold
+C_OFI_THRESHOLD = 0.3
+C_OFI_LOGIT_MULT = 3  # Multiplier for OFI logit scaling
+
+# Oscillation (O-level) thresholds
+O_SWEEP_OFI_THRESHOLD = 0.5
+O_SWEEP_LOGIT_MULT = 2  # Multiplier for sweep-revert logit
+
+# Flow (F-level) thresholds
+F_MOM_CHANGE_VOL_MULT = 0.5  # Accel/decel threshold relative to vol
+F_STALL_VOL_MULT = 0.2  # Stall threshold relative to vol
+
+# Logit scores for rule-based classification
+# Higher positive = strong match, negative = non-match
+LOGIT_STRONG_MATCH = 3.0
+LOGIT_STRONG_MISMATCH = -2.0
+LOGIT_MODERATE_MATCH = 2.0
+LOGIT_MODERATE_MISMATCH = -1.0
+LOGIT_WEAK_MATCH = 2.5
+LOGIT_WEAK_MISMATCH = -1.5
+
+# Species (S-level) thresholds
+S_SMALL_RETURN_THRESHOLD = 0.001  # For S_RANGE_MID_MEANREV classification
+
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
     """Numerically stable softmax."""
@@ -47,7 +91,7 @@ class KPCOFGSClassifier:
         ]
 
         # Temperature for softmax (lower = sharper distributions)
-        self.temperature = 2.0
+        self.temperature = self.config.get("temperature", DEFAULT_TEMPERATURE)
 
     def _classify_K(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """Classify K-level (Kinetics) with probabilities.
@@ -61,18 +105,18 @@ class KPCOFGSClassifier:
         vol = np.where(np.isnan(vol), 0.01, vol)
 
         # Compute logits based on distance from decision boundaries
-        # K_TRENDING: |returns| > vol * 1.5
-        # K_MEAN_REVERTING: |returns| < vol * 0.5
+        # K_TRENDING: |returns| > vol * K_TRENDING_VOL_MULT
+        # K_MEAN_REVERTING: |returns| < vol * K_MEAN_REV_VOL_MULT
         # K_BALANCED: otherwise
 
         logits = np.zeros((n, 3))
 
-        # Trending score: how much |returns| exceeds vol * 1.5
-        trending_score = (returns_abs - vol * 1.5) / (vol + 1e-10)
+        # Trending score: how much |returns| exceeds vol * K_TRENDING_VOL_MULT
+        trending_score = (returns_abs - vol * K_TRENDING_VOL_MULT) / (vol + 1e-10)
         logits[:, 0] = trending_score * self.temperature
 
-        # Mean-reverting score: how much vol * 0.5 exceeds |returns|
-        mr_score = (vol * 0.5 - returns_abs) / (vol + 1e-10)
+        # Mean-reverting score: how much vol * K_MEAN_REV_VOL_MULT exceeds |returns|
+        mr_score = (vol * K_MEAN_REV_VOL_MULT - returns_abs) / (vol + 1e-10)
         logits[:, 1] = mr_score * self.temperature
 
         # Balanced: base case (neutral logit)
@@ -94,12 +138,12 @@ class KPCOFGSClassifier:
 
         logits = np.zeros((n, 3))
 
-        # Vol expanding: vol > vol_prev * 1.2
-        expanding_score = (vol - vol_prev * 1.2) / (vol_prev + 1e-10)
+        # Vol expanding: vol > vol_prev * P_VOL_EXPAND_MULT
+        expanding_score = (vol - vol_prev * P_VOL_EXPAND_MULT) / (vol_prev + 1e-10)
         logits[:, 0] = expanding_score * self.temperature
 
-        # Vol contracting: vol < vol_prev * 0.8
-        contracting_score = (vol_prev * 0.8 - vol) / (vol_prev + 1e-10)
+        # Vol contracting: vol < vol_prev * P_VOL_CONTRACT_MULT
+        contracting_score = (vol_prev * P_VOL_CONTRACT_MULT - vol) / (vol_prev + 1e-10)
         logits[:, 1] = contracting_score * self.temperature
 
         # Stable: base case
@@ -118,11 +162,11 @@ class KPCOFGSClassifier:
 
         logits = np.zeros((n, 3))
 
-        # Buy flow dominant: ofi > 0.3
-        logits[:, 0] = (ofi - 0.3) * self.temperature * 3
+        # Buy flow dominant: ofi > C_OFI_THRESHOLD
+        logits[:, 0] = (ofi - C_OFI_THRESHOLD) * self.temperature * C_OFI_LOGIT_MULT
 
-        # Sell flow dominant: ofi < -0.3
-        logits[:, 1] = (-ofi - 0.3) * self.temperature * 3
+        # Sell flow dominant: ofi < -C_OFI_THRESHOLD
+        logits[:, 1] = (-ofi - C_OFI_THRESHOLD) * self.temperature * C_OFI_LOGIT_MULT
 
         # Neutral: base case
         logits[:, 2] = 0.0
@@ -145,17 +189,17 @@ class KPCOFGSClassifier:
 
         # Breakout: returns > 0 AND range > range_mean
         breakout_cond = (returns > 0) & (range_pct > range_mean)
-        logits[:, 0] = np.where(breakout_cond, 2.0, -1.0) * self.temperature
+        logits[:, 0] = np.where(breakout_cond, LOGIT_MODERATE_MATCH, LOGIT_MODERATE_MISMATCH) * self.temperature
 
         # Breakdown: returns < 0 AND range > range_mean
         breakdown_cond = (returns < 0) & (range_pct > range_mean)
-        logits[:, 1] = np.where(breakdown_cond, 2.0, -1.0) * self.temperature
+        logits[:, 1] = np.where(breakdown_cond, LOGIT_MODERATE_MATCH, LOGIT_MODERATE_MISMATCH) * self.temperature
 
         # Range: base case
         logits[:, 2] = 0.0
 
-        # Sweep revert: |ofi| > 0.5
-        logits[:, 3] = (ofi_abs - 0.5) * self.temperature * 2
+        # Sweep revert: |ofi| > O_SWEEP_OFI_THRESHOLD
+        logits[:, 3] = (ofi_abs - O_SWEEP_OFI_THRESHOLD) * self.temperature * O_SWEEP_LOGIT_MULT
 
         probs = _softmax(logits)
         labels_idx = np.argmax(probs, axis=1)
@@ -178,14 +222,14 @@ class KPCOFGSClassifier:
 
         logits = np.zeros((n, 4))
 
-        # Accel: mom_change > vol * 0.5
-        logits[:, 0] = (mom_change - vol * 0.5) / (vol + 1e-10) * self.temperature
+        # Accel: mom_change > vol * F_MOM_CHANGE_VOL_MULT
+        logits[:, 0] = (mom_change - vol * F_MOM_CHANGE_VOL_MULT) / (vol + 1e-10) * self.temperature
 
-        # Decel: mom_change < -vol * 0.5
-        logits[:, 1] = (-mom_change - vol * 0.5) / (vol + 1e-10) * self.temperature
+        # Decel: mom_change < -vol * F_MOM_CHANGE_VOL_MULT
+        logits[:, 1] = (-mom_change - vol * F_MOM_CHANGE_VOL_MULT) / (vol + 1e-10) * self.temperature
 
-        # Stall: |mom| < vol * 0.2
-        stall_score = (vol * 0.2 - np.abs(mom)) / (vol + 1e-10)
+        # Stall: |mom| < vol * F_STALL_VOL_MULT
+        stall_score = (vol * F_STALL_VOL_MULT - np.abs(mom)) / (vol + 1e-10)
         logits[:, 2] = stall_score * self.temperature
 
         # Reversal: base case
@@ -207,23 +251,23 @@ class KPCOFGSClassifier:
 
         # G_TREND_CONT: K=TRENDING AND F=ACCEL
         tc_cond = (K_labels == "K_TRENDING") & (F_labels == "F_ACCEL")
-        logits[:, 0] = np.where(tc_cond, 3.0, -2.0) * self.temperature
+        logits[:, 0] = np.where(tc_cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # G_TREND_EXH: K=TRENDING AND F=DECEL
         te_cond = (K_labels == "K_TRENDING") & (F_labels == "F_DECEL")
-        logits[:, 1] = np.where(te_cond, 3.0, -2.0) * self.temperature
+        logits[:, 1] = np.where(te_cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # G_MR_BOUNCE: K=MR AND returns > 0
         mrb_cond = (K_labels == "K_MEAN_REVERTING") & (returns > 0)
-        logits[:, 2] = np.where(mrb_cond, 3.0, -2.0) * self.temperature
+        logits[:, 2] = np.where(mrb_cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # G_MR_FADE: K=MR AND returns < 0
         mrf_cond = (K_labels == "K_MEAN_REVERTING") & (returns < 0)
-        logits[:, 3] = np.where(mrf_cond, 3.0, -2.0) * self.temperature
+        logits[:, 3] = np.where(mrf_cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # G_BO_HOLD: O=BREAKOUT
         bh_cond = (O_labels == "O_BREAKOUT")
-        logits[:, 4] = np.where(bh_cond, 2.0, -1.0) * self.temperature
+        logits[:, 4] = np.where(bh_cond, LOGIT_MODERATE_MATCH, LOGIT_MODERATE_MISMATCH) * self.temperature
 
         # G_BO_FAIL: base case
         logits[:, 5] = 0.0
@@ -246,47 +290,47 @@ class KPCOFGSClassifier:
 
         # S_TC_PULLBACK_RESUME: G=TREND_CONT AND F=DECEL
         cond = (G_labels == "G_TREND_CONT") & (F_labels == "F_DECEL")
-        logits[:, 0] = np.where(cond, 3.0, -2.0) * self.temperature
+        logits[:, 0] = np.where(cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # S_TC_ACCEL_BREAK: G=TREND_CONT AND F=ACCEL
         cond = (G_labels == "G_TREND_CONT") & (F_labels == "F_ACCEL")
-        logits[:, 1] = np.where(cond, 3.0, -2.0) * self.temperature
+        logits[:, 1] = np.where(cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # S_TX_TOPPING_ROLL: G=TREND_EXH
         cond = (G_labels == "G_TREND_EXH")
-        logits[:, 2] = np.where(cond, 3.0, -2.0) * self.temperature
+        logits[:, 2] = np.where(cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
-        # S_MR_OVERSHOOT_SNAPBACK: G=MR_BOUNCE AND ofi > 0.3
-        cond = (G_labels == "G_MR_BOUNCE") & (ofi > 0.3)
-        logits[:, 3] = np.where(cond, 3.0, -2.0) * self.temperature
+        # S_MR_OVERSHOOT_SNAPBACK: G=MR_BOUNCE AND ofi > C_OFI_THRESHOLD
+        cond = (G_labels == "G_MR_BOUNCE") & (ofi > C_OFI_THRESHOLD)
+        logits[:, 3] = np.where(cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # S_MR_GRIND_BACK: G=MR_FADE
         cond = (G_labels == "G_MR_FADE")
-        logits[:, 4] = np.where(cond, 3.0, -2.0) * self.temperature
+        logits[:, 4] = np.where(cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # S_BO_LEVEL_BREAK_HOLD: G=BO_HOLD
         cond = (G_labels == "G_BO_HOLD")
-        logits[:, 5] = np.where(cond, 3.0, -2.0) * self.temperature
+        logits[:, 5] = np.where(cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # S_BO_LEVEL_BREAK_FAIL: G=BO_FAIL
         cond = (G_labels == "G_BO_FAIL")
-        logits[:, 6] = np.where(cond, 2.0, -1.0) * self.temperature
+        logits[:, 6] = np.where(cond, LOGIT_MODERATE_MATCH, LOGIT_MODERATE_MISMATCH) * self.temperature
 
         # S_RANGE_EDGE_FADE: O=RANGE
         cond = (O_labels == "O_RANGE")
-        logits[:, 7] = np.where(cond, 2.0, -1.0) * self.temperature
+        logits[:, 7] = np.where(cond, LOGIT_MODERATE_MATCH, LOGIT_MODERATE_MISMATCH) * self.temperature
 
         # S_RANGE_MID_MEANREV: O=RANGE and small returns
-        cond = (O_labels == "O_RANGE") & (np.abs(returns) < 0.001)
-        logits[:, 8] = np.where(cond, 2.5, -1.5) * self.temperature
+        cond = (O_labels == "O_RANGE") & (np.abs(returns) < S_SMALL_RETURN_THRESHOLD)
+        logits[:, 8] = np.where(cond, LOGIT_WEAK_MATCH, LOGIT_WEAK_MISMATCH) * self.temperature
 
         # S_SWEEP_UP_REVERT: O=SWEEP_REVERT AND returns > 0
         cond = (O_labels == "O_SWEEP_REVERT") & (returns > 0)
-        logits[:, 9] = np.where(cond, 3.0, -2.0) * self.temperature
+        logits[:, 9] = np.where(cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # S_SWEEP_DOWN_REVERT: O=SWEEP_REVERT AND returns < 0
         cond = (O_labels == "O_SWEEP_REVERT") & (returns < 0)
-        logits[:, 10] = np.where(cond, 3.0, -2.0) * self.temperature
+        logits[:, 10] = np.where(cond, LOGIT_STRONG_MATCH, LOGIT_STRONG_MISMATCH) * self.temperature
 
         # S_UNCERTAIN: base case (default)
         logits[:, 11] = 0.0

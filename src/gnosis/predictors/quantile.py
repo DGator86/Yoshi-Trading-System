@@ -3,6 +3,14 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
 
+# Constants for quantile prediction
+# Z-score for 90% confidence interval (two-tailed)
+Z_SCORE_90 = 1.645
+# Divisor to convert 90% interval width to approximate standard deviation
+# Based on normal distribution: (q95 - q05) / 3.29 ≈ sigma
+# where 3.29 = 2 * 1.645 (z-scores for 5th and 95th percentiles)
+IQR_TO_SIGMA_DIVISOR = 3.29
+
 
 class QuantilePredictor:
     """Simple quantile predictor using tilted loss approximation."""
@@ -52,38 +60,34 @@ class QuantilePredictor:
 
         # Point estimate is median
         result["x_hat"] = result["q50"]
-        
-        # Optional: widen/narrow intervals (deterministic, config-driven)
-        _pred_cfg = self.config.get("predictor", {}) if isinstance(self.config, dict) else {}
-        sigma_scale = float(_pred_cfg.get("sigma_scale", 1.0))
+
+        # Compute base uncertainty from IQR (before any scaling)
+        result["sigma_hat"] = (result["q95"] - result["q05"]) / IQR_TO_SIGMA_DIVISOR
+
+        # Apply sigma_scale to widen/narrow intervals (deterministic, config-driven)
+        # Resolve sigma_scale from config with priority:
+        # 1. models.predictor.sigma_scale (most specific)
+        # 2. models.sigma_scale (fallback)
+        # 3. 1.0 (default - no scaling)
+        sigma_scale = 1.0
+        if isinstance(self.config, dict):
+            sigma_scale = float(self.config.get('sigma_scale', 1.0))
+            predictor_cfg = self.config.get('predictor', {})
+            if isinstance(predictor_cfg, dict) and 'sigma_scale' in predictor_cfg:
+                sigma_scale = float(predictor_cfg['sigma_scale'])
+
+        # Ensure sigma_scale is valid
         if sigma_scale <= 0:
             sigma_scale = 1.0
 
-        # Uncertainty from IQR
-        result["sigma_hat"] = (result["q95"] - result["q05"]) / 3.29  # approx std
-        if sigma_scale != 1.0:
-            z = 1.645
-            result["sigma_hat"] = result["sigma_hat"] * sigma_scale
-            result["q05"] = result["q50"] - z * result["sigma_hat"]
-            result["q95"] = result["q50"] + z * result["sigma_hat"]
-
-
-        # SIGMA_SCALE_APPLIED
-        # Apply optional sigma_scale AFTER all q05/q95 assignments (so it cannot be overwritten).
-        sigma_scale = 1.0
-        if isinstance(self.config, dict):
-            # support BOTH: models.sigma_scale and models.predictor.sigma_scale
-            sigma_scale = float(self.config.get('sigma_scale', 1.0))
-            _pcfg = self.config.get('predictor', {})
-            if isinstance(_pcfg, dict) and 'sigma_scale' in _pcfg:
-                sigma_scale = float(_pcfg.get('sigma_scale', sigma_scale))
+        # Apply scaling if needed (only once)
         if sigma_scale != 1.0:
             center = result['q50']
             half = (result['q95'] - result['q05']) / 2.0
             half = half * sigma_scale
             result['q05'] = center - half
             result['q95'] = center + half
-            result['sigma_hat'] = (result['q95'] - result['q05']) / 3.29
+            result['sigma_hat'] = (result['q95'] - result['q05']) / IQR_TO_SIGMA_DIVISOR
 
         return result
 
@@ -105,9 +109,9 @@ class BaselinePredictor:
         vol = df["realized_vol"].fillna(df["realized_vol"].median())
         result["sigma_hat"] = vol
 
-        # Quantiles from normal distribution
-        result["q05"] = -1.645 * vol
+        # Quantiles from normal distribution using 90% confidence z-score
+        result["q05"] = -Z_SCORE_90 * vol
         result["q50"] = 0.0
-        result["q95"] = 1.645 * vol
+        result["q95"] = Z_SCORE_90 * vol
 
         return result
