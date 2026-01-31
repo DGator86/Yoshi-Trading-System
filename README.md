@@ -23,7 +23,7 @@ Fetch real cryptocurrency market data from CoinGecko:
 
 ```bash
 # Set API key in environment
-export COINGECKO_API_KEY=CG-krJCp3qpAfGUnTb5qDXezUzz
+export COINGECKO_API_KEY=your-api-key-here
 
 # Or copy .env.example to .env and set your API key
 cp .env.example .env

@@ -66,13 +66,17 @@ def main():
             print(f"Removed cached file: {parquet_path}")
 
     use_coingecko = not args.stub
-    api_key = args.api_key or os.getenv("COINGECKO_API_KEY", "CG-krJCp3qpAfGUnTb5qDXezUzz")
+    api_key = args.api_key or os.getenv("COINGECKO_API_KEY")
 
     print(f"Fetching data for symbols: {args.symbols}")
     print(f"Data source: {'CoinGecko API' if use_coingecko else 'Stub data'}")
     
     if use_coingecko:
-        print(f"API key: {api_key[:10]}..." if api_key else "No API key provided")
+        if not api_key:
+            print("Error: COINGECKO_API_KEY environment variable or --api-key argument required for CoinGecko data source", file=sys.stderr)
+            print("Either set the environment variable or use --stub for synthetic data", file=sys.stderr)
+            sys.exit(1)
+        print(f"API key: {api_key[:10]}...")
 
     try:
         # Load or create prints
