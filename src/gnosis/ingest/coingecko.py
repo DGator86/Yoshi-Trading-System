@@ -15,6 +15,13 @@ class CoinGeckoClient:
 
     BASE_URL = "https://api.coingecko.com/api/v3"
     
+    # Rate limiting configuration
+    RATE_LIMIT_DELAY_SECONDS = 1.5
+    
+    # Synthetic trade generation parameters
+    PRICE_VARIATION_PERCENT = 0.001  # ±0.1% price variation for synthetic trades
+    SECONDS_PER_TRADE = 10  # Time offset between synthetic trades
+    
     # Mapping from common trading pair symbols to CoinGecko coin IDs
     SYMBOL_TO_COIN_ID = {
         "BTCUSDT": "bitcoin",
@@ -109,8 +116,10 @@ class CoinGeckoClient:
             
             # Generate synthetic trades around each price point
             for i in range(trades_per_interval):
-                # Add slight price variation (±0.1%)
-                price_variation = price * (1 + (i - trades_per_interval / 2) * 0.001 / trades_per_interval)
+                # Add slight price variation
+                price_variation = price * (
+                    1 + (i - trades_per_interval / 2) * self.PRICE_VARIATION_PERCENT / trades_per_interval
+                )
                 
                 # Alternate between BUY and SELL
                 side = "BUY" if i % 2 == 0 else "SELL"
@@ -119,7 +128,7 @@ class CoinGeckoClient:
                 quantity = 0.1 + (i * 0.01)
                 
                 # Offset timestamp slightly within the interval
-                time_offset = timedelta(seconds=i * 10)
+                time_offset = timedelta(seconds=i * self.SECONDS_PER_TRADE)
                 
                 records.append({
                     "timestamp": timestamp + time_offset,
@@ -185,8 +194,8 @@ def fetch_coingecko_prints(
                 trades_per_interval=trades_per_interval,
             )
             dfs.append(df)
-            # Rate limiting: small delay between requests
-            time.sleep(1.5)
+            # Rate limiting to respect API limits
+            time.sleep(CoinGeckoClient.RATE_LIMIT_DELAY_SECONDS)
         except Exception as e:
             print(f"Warning: Failed to fetch data for {symbol}: {e}")
             continue
