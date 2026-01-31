@@ -7,6 +7,13 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
+# Import CoinGecko at module level for better code organization
+try:
+    from .coingecko import fetch_coingecko_prints
+    COINGECKO_AVAILABLE = True
+except ImportError:
+    COINGECKO_AVAILABLE = False
+
 
 def generate_stub_prints(
     symbols: list[str],
@@ -95,7 +102,8 @@ def load_or_create_prints(
 
     if use_coingecko:
         # Fetch real data from CoinGecko
-        from .coingecko import fetch_coingecko_prints
+        if not COINGECKO_AVAILABLE:
+            raise ImportError("CoinGecko module not available. Check installation.")
         df = fetch_coingecko_prints(
             symbols=symbols,
             api_key=coingecko_api_key,

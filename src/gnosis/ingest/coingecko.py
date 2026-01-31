@@ -196,8 +196,14 @@ def fetch_coingecko_prints(
             dfs.append(df)
             # Rate limiting to respect API limits
             time.sleep(CoinGeckoClient.RATE_LIMIT_DELAY_SECONDS)
+        except requests.RequestException as e:
+            print(f"Warning: Network error fetching data for {symbol}: {e}")
+            continue
+        except ValueError as e:
+            print(f"Warning: Invalid data for {symbol}: {e}")
+            continue
         except Exception as e:
-            print(f"Warning: Failed to fetch data for {symbol}: {e}")
+            print(f"Warning: Unexpected error fetching data for {symbol} ({type(e).__name__}): {e}")
             continue
     
     if not dfs:

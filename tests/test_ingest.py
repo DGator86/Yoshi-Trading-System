@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import pandas as pd
+import pytest
 from gnosis.ingest import generate_stub_prints, CoinGeckoClient
 
 
@@ -51,11 +52,8 @@ def test_coingecko_get_coin_id():
     assert client.get_coin_id("SOLUSDT") == "solana"
     
     # Test unsupported symbol
-    try:
+    with pytest.raises(ValueError, match="Unsupported symbol"):
         client.get_coin_id("UNSUPPORTED")
-        assert False, "Should raise ValueError"
-    except ValueError as e:
-        assert "Unsupported symbol" in str(e)
 
 
 def test_coingecko_convert_to_prints():
