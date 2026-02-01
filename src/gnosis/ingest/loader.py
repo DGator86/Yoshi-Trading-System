@@ -69,17 +69,65 @@ def load_or_create_prints(
     parquet_dir: str | Path,
     symbols: list[str],
     seed: int = 1337,
+    mode: str = "parquet",
+    live_config: dict | None = None,
 ) -> pd.DataFrame:
-    """Load prints from parquet or create stub data."""
+    """Load prints from parquet, fetch live data, or create stub data.
+
+    Args:
+        parquet_dir: Directory for parquet files
+        symbols: List of trading pairs (e.g., ['BTCUSDT', 'ETHUSDT'])
+        seed: Random seed for stub data generation
+        mode: Data source mode - 'parquet', 'stub', or 'live'
+        live_config: Configuration dict for live data fetching:
+            - exchange: Exchange name (default: 'binance')
+            - days: Days of historical data (default: 30)
+            - api_key: Optional API key
+            - secret: Optional API secret
+
+    Returns:
+        DataFrame with print (trade) data
+    """
     parquet_dir = Path(parquet_dir)
     parquet_dir.mkdir(parents=True, exist_ok=True)
 
     prints_path = parquet_dir / "prints.parquet"
 
-    if prints_path.exists():
+    # Mode: parquet - load from file if exists
+    if mode == "parquet" and prints_path.exists():
         return pd.read_parquet(prints_path)
 
-    # Generate and save stub data
+    # Mode: live - fetch real data via CCXT
+    if mode == "live":
+        try:
+            from .ccxt_loader import fetch_live_prints
+        except ImportError:
+            raise ImportError(
+                "CCXT is required for live data mode. "
+                "Install with: pip install ccxt"
+            )
+
+        live_config = live_config or {}
+        exchange = live_config.get("exchange", "binance")
+        days = live_config.get("days", 30)
+        api_key = live_config.get("api_key")
+        secret = live_config.get("secret")
+
+        print(f"Fetching live data from {exchange} for {symbols}...")
+        df = fetch_live_prints(
+            symbols=symbols,
+            exchange=exchange,
+            days=days,
+            api_key=api_key,
+            secret=secret,
+        )
+
+        # Cache to parquet for future runs
+        df.to_parquet(prints_path, index=False)
+        print(f"Cached {len(df)} trades to {prints_path}")
+        return df
+
+    # Mode: stub or fallback - generate synthetic data
     df = generate_stub_prints(symbols, seed=seed, n_days=30, trades_per_day=5000)
     df.to_parquet(prints_path, index=False)
     return df

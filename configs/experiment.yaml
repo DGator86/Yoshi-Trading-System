@@ -4,8 +4,14 @@ symbols:
 - SOLUSDT
 venue: binance_spot
 dataset:
-  mode: parquet
+  mode: parquet  # Options: parquet, stub, live
   parquet_dir: data/parquet
+  # Live data settings (used when mode: live)
+  live:
+    exchange: binance
+    days: 30  # Days of historical data to fetch
+    # api_key: ${CCXT_API_KEY}  # Optional: set via environment variable
+    # secret: ${CCXT_SECRET}    # Optional: set via environment variable
 random_seed: 1337
 walkforward:
   outer_folds: 8

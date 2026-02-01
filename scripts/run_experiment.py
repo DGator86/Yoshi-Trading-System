@@ -151,13 +151,20 @@ def run_experiment(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     symbols = config["symbols"]
-    parquet_dir = config["dataset"]["parquet_dir"]
+    dataset_config = config["dataset"]
+    parquet_dir = dataset_config["parquet_dir"]
+    data_mode = dataset_config.get("mode", "parquet")
+    live_config = dataset_config.get("live", {})
     regimes_config = config.get("regimes", {})
 
     # 1. Load or create print data
-    print("Loading/creating print data...")
+    print(f"Loading/creating print data (mode: {data_mode})...")
     prints_df = load_or_create_prints(
-        parquet_dir, symbols, seed=config.get("random_seed", 1337)
+        parquet_dir,
+        symbols,
+        seed=config.get("random_seed", 1337),
+        mode=data_mode,
+        live_config=live_config,
     )
 
     # 2. Create data manifest
