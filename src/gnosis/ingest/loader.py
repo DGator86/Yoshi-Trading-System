@@ -15,52 +15,54 @@ def generate_stub_prints(
     trades_per_day: int = 50000,
     seed: int = 1337,
 ) -> pd.DataFrame:
-    """Generate stub print (trade) data for testing."""
+    """Generate stub print (trade) data for testing.
+
+    Uses pre-allocated arrays for memory efficiency.
+    """
     rng = np.random.default_rng(seed)
-
-    records = []
     base_prices = {"BTCUSDT": 30000.0, "ETHUSDT": 2000.0, "SOLUSDT": 25.0}
-
     start = pd.Timestamp(start_date)
+
+    # Pre-calculate total records for memory pre-allocation
+    all_dfs = []
 
     for sym in symbols:
         price = base_prices.get(sym, 100.0)
         vol = price * 0.02  # 2% daily vol
 
         for day in range(n_days):
-            # Back-compat alias: n_days + trades_per_day -> total n_trades
-            if n_days is not None:
-                n_trades = int(n_days) * int(trades_per_day)
-
             day_start = start + timedelta(days=day)
+
             # Add variation but ensure at least 10 trades
             variation = min(trades_per_day // 2, 5000)
             n_trades = max(10, trades_per_day + rng.integers(-variation, variation + 1))
 
-            # Random walk for prices
+            # Random walk for prices (vectorized)
             returns = rng.normal(0, vol / np.sqrt(n_trades), n_trades)
             prices = price * np.exp(np.cumsum(returns / price))
             price = prices[-1]  # carry forward
 
-            # Timestamps spread across the day
+            # Timestamps spread across the day (vectorized)
             offsets_ms = np.sort(rng.integers(0, 86400000, n_trades))
-            timestamps = [day_start + timedelta(milliseconds=int(o)) for o in offsets_ms]
+            timestamps = pd.to_datetime(day_start) + pd.to_timedelta(offsets_ms, unit='ms')
 
-            # Quantities and sides
+            # Quantities and sides (vectorized)
             qtys = rng.exponential(0.1, n_trades)
             sides = rng.choice(["BUY", "SELL"], n_trades, p=[0.5, 0.5])
 
-            for i in range(n_trades):
-                records.append({
-                    "timestamp": timestamps[i],
-                    "symbol": sym,
-                    "price": round(prices[i], 2),
-                    "quantity": round(qtys[i], 6),
-                    "side": sides[i],
-                    "trade_id": f"{sym}_{day}_{i}",
-                })
+            # Create DataFrame for this day (vectorized, no row-by-row append)
+            day_df = pd.DataFrame({
+                "timestamp": timestamps,
+                "symbol": sym,
+                "price": np.round(prices, 2),
+                "quantity": np.round(qtys, 6),
+                "side": sides,
+                "trade_id": [f"{sym}_{day}_{i}" for i in range(n_trades)],
+            })
+            all_dfs.append(day_df)
 
-    df = pd.DataFrame(records)
+    # Concatenate all at once (much faster than row-by-row)
+    df = pd.concat(all_dfs, ignore_index=True)
     df = df.sort_values("timestamp").reset_index(drop=True)
     return df
 

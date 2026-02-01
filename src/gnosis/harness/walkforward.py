@@ -29,22 +29,41 @@ class WalkForwardHarness:
         self.embargo_trades = config.get("embargo_trades", "HORIZON")
 
     def generate_folds(self, df: pd.DataFrame, horizon_trades: int = 2000) -> Iterator[Fold]:
-        """Generate walk-forward folds with purge/embargo."""
+        """Generate walk-forward folds with purge/embargo.
+
+        Uses proportional allocation based on configured day ratios.
+        """
         n_bars = len(df)
-        total_window = self.train_days + self.val_days + self.test_days
+        if n_bars < 50:
+            return  # Not enough data for any folds
 
-        # Calculate bars per day (approximate)
-        bars_per_day = max(1, n_bars // 30)  # assuming ~30 days of data in stub
+        total_days = self.train_days + self.val_days + self.test_days
 
-        train_bars = self.train_days * bars_per_day // 30  # scale down
-        val_bars = self.val_days * bars_per_day // 30
-        test_bars = self.test_days * bars_per_day // 30
+        # Calculate bar proportions based on day ratios
+        train_ratio = self.train_days / total_days
+        val_ratio = self.val_days / total_days
+        test_ratio = self.test_days / total_days
 
         # Purge/embargo in bars (based on horizon)
-        purge_bars = max(1, horizon_trades // 200)  # D0 has 200 trades
+        purge_bars = max(1, horizon_trades // 200)  # D0 has 200 trades per bar
         embargo_bars = purge_bars
 
-        step = (n_bars - train_bars - val_bars - test_bars - purge_bars * 2 - embargo_bars) // max(1, self.outer_folds - 1)
+        # Total bars needed for one fold (train + val + test + gaps)
+        gap_bars = purge_bars + embargo_bars
+
+        # Reserve space for gaps and compute usable bars per fold
+        # We need: outer_folds * (train + val + test) + gaps between them
+        bars_per_fold = (n_bars - gap_bars * self.outer_folds) // self.outer_folds
+        if bars_per_fold < 30:
+            # Fall back to simpler approach: use all data with proportional splits
+            bars_per_fold = n_bars // max(2, self.outer_folds)
+
+        train_bars = max(10, int(bars_per_fold * train_ratio))
+        val_bars = max(5, int(bars_per_fold * val_ratio))
+        test_bars = max(5, int(bars_per_fold * test_ratio))
+
+        # Step size between folds
+        step = (n_bars - train_bars - val_bars - test_bars - gap_bars) // max(1, self.outer_folds - 1)
         step = max(1, step)
 
         for i in range(self.outer_folds):

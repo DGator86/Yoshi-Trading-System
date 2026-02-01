@@ -23,7 +23,9 @@ class ParticleState:
         ) * self.flow_weight
 
         # Regime stability (how consistent the K label has been)
-        df["regime_encoded"] = df["K"].map({
+        # Use K_label if available, fall back to K for backwards compatibility
+        k_col = "K_label" if "K_label" in df.columns else "K"
+        df["regime_encoded"] = df[k_col].map({
             "K_TRENDING": 1,
             "K_MEAN_REVERTING": -1,
             "K_BALANCED": 0

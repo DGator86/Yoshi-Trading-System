@@ -5,8 +5,50 @@ import numpy as np
 import pandas as pd
 
 
+# Maximum value to use instead of inf for JSON serialization
+MAX_RATIO = 1e6
+
+
 class StatsCalculator:
     """Calculate performance statistics from backtest results."""
+
+    @staticmethod
+    def _estimate_periods_per_year(equity_curve: pd.DataFrame) -> float:
+        """Estimate annualization factor from actual data frequency.
+
+        Returns:
+            Estimated periods per year based on data timestamps
+        """
+        if len(equity_curve) < 2:
+            return 365 * 24  # Default to hourly
+
+        if "timestamp" not in equity_curve.columns:
+            return 365 * 24
+
+        timestamps = pd.to_datetime(equity_curve["timestamp"])
+        time_range = (timestamps.max() - timestamps.min()).total_seconds()
+
+        if time_range <= 0:
+            return 365 * 24
+
+        n_periods = len(equity_curve)
+        avg_period_seconds = time_range / (n_periods - 1)
+
+        if avg_period_seconds <= 0:
+            return 365 * 24
+
+        # Periods per year = seconds_per_year / avg_period_seconds
+        seconds_per_year = 365.25 * 24 * 3600
+        return seconds_per_year / avg_period_seconds
+
+    @staticmethod
+    def _safe_ratio(value: float) -> float:
+        """Convert inf to MAX_RATIO for JSON-safe output."""
+        if np.isinf(value):
+            return MAX_RATIO if value > 0 else -MAX_RATIO
+        if np.isnan(value):
+            return 0.0
+        return float(value)
 
     @staticmethod
     def compute(
@@ -14,7 +56,7 @@ class StatsCalculator:
         trades_df: pd.DataFrame,
         initial_capital: float,
         risk_free_rate: float = 0.0,
-        periods_per_year: int = 365 * 24,  # Assume hourly-ish bars
+        periods_per_year: int = None,  # Auto-detect if None
     ) -> Dict:
         """Compute comprehensive performance statistics.
 
@@ -23,12 +65,16 @@ class StatsCalculator:
             trades_df: DataFrame with 'pnl', 'fee' columns
             initial_capital: Starting capital
             risk_free_rate: Annual risk-free rate (default 0)
-            periods_per_year: Number of periods per year for annualization
+            periods_per_year: Number of periods per year for annualization (auto-detect if None)
 
         Returns:
-            Dict with performance metrics
+            Dict with performance metrics (all values are JSON-safe)
         """
         stats = {}
+
+        # Auto-detect periods per year if not provided
+        if periods_per_year is None:
+            periods_per_year = StatsCalculator._estimate_periods_per_year(equity_curve)
 
         # Basic equity stats
         if equity_curve.empty:
@@ -73,11 +119,14 @@ class StatsCalculator:
                         sortino = (
                             mean_ret - risk_free_rate / periods_per_year
                         ) / downside_std
-                        stats["sortino_ratio"] = sortino * np.sqrt(periods_per_year)
+                        stats["sortino_ratio"] = StatsCalculator._safe_ratio(
+                            sortino * np.sqrt(periods_per_year)
+                        )
                     else:
                         stats["sortino_ratio"] = 0.0
                 else:
-                    stats["sortino_ratio"] = float("inf") if mean_ret > 0 else 0.0
+                    # No downside returns - use MAX_RATIO if positive returns
+                    stats["sortino_ratio"] = MAX_RATIO if mean_ret > 0 else 0.0
             else:
                 stats["sharpe_ratio"] = 0.0
                 stats["sortino_ratio"] = 0.0
@@ -104,11 +153,14 @@ class StatsCalculator:
                 annual_return = (
                     (1 + stats["total_return"]) ** (periods_per_year / n_periods) - 1
                 )
-                stats["calmar_ratio"] = annual_return / stats["max_drawdown"]
+                stats["calmar_ratio"] = StatsCalculator._safe_ratio(
+                    annual_return / stats["max_drawdown"]
+                )
             else:
                 stats["calmar_ratio"] = 0.0
         else:
-            stats["calmar_ratio"] = float("inf") if stats["total_return"] > 0 else 0.0
+            # No drawdown - use MAX_RATIO if positive returns
+            stats["calmar_ratio"] = MAX_RATIO if stats["total_return"] > 0 else 0.0
 
         # Trade statistics
         if not trades_df.empty:
@@ -130,9 +182,12 @@ class StatsCalculator:
                 gross_profit = winners.sum() if len(winners) > 0 else 0
                 gross_loss = abs(losers.sum()) if len(losers) > 0 else 0
                 if gross_loss > 0:
-                    stats["profit_factor"] = gross_profit / gross_loss
+                    stats["profit_factor"] = StatsCalculator._safe_ratio(
+                        gross_profit / gross_loss
+                    )
                 else:
-                    stats["profit_factor"] = float("inf") if gross_profit > 0 else 0.0
+                    # No losses - use MAX_RATIO if there were profits
+                    stats["profit_factor"] = MAX_RATIO if gross_profit > 0 else 0.0
             else:
                 stats["avg_trade_pnl"] = 0.0
                 stats["win_rate"] = 0.0

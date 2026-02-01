@@ -1,6 +1,7 @@
 """Signal generation from forecasts."""
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 
@@ -59,7 +60,7 @@ class SignalGenerator:
         return 0
 
     def generate(self, predictions_df: pd.DataFrame) -> pd.DataFrame:
-        """Add 'signal' column to predictions DataFrame.
+        """Add 'signal' column to predictions DataFrame (vectorized).
 
         Args:
             predictions_df: DataFrame with forecast columns
@@ -68,5 +69,43 @@ class SignalGenerator:
             Copy of DataFrame with 'signal' column added (1=LONG, 0=FLAT)
         """
         df = predictions_df.copy()
-        df["signal"] = df.apply(self.generate_single, axis=1)
+        n = len(df)
+
+        # Start with all signals as 0 (FLAT)
+        signals = np.zeros(n, dtype=int)
+
+        # Build mask of rows that pass the abstain filter
+        if self.config.use_abstain and "abstain" in df.columns:
+            abstain_mask = df["abstain"].fillna(False).astype(bool).values
+        else:
+            abstain_mask = np.zeros(n, dtype=bool)
+
+        # Build mask of rows that pass the confidence filter
+        if "S_pmax" in df.columns and self.config.min_confidence > 0:
+            conf_mask = df["S_pmax"].fillna(0).values < self.config.min_confidence
+        else:
+            conf_mask = np.zeros(n, dtype=bool)
+
+        # Combine filters: rows that are NOT filtered out
+        valid_mask = ~abstain_mask & ~conf_mask
+
+        if self.config.mode == "x_hat_threshold":
+            # Get x_hat values, replacing NaN with threshold (will result in no signal)
+            x_hat = df["x_hat"].fillna(self.config.long_threshold).values
+            # Signal is 1 where x_hat > threshold AND row is valid
+            signals = np.where(valid_mask & (x_hat > self.config.long_threshold), 1, 0)
+
+        elif self.config.mode == "quantile_skew":
+            q05 = df.get("q05", pd.Series(0.0, index=df.index)).fillna(0).values
+            q50 = df.get("q50", pd.Series(0.0, index=df.index)).fillna(0).values
+            q95 = df.get("q95", pd.Series(0.0, index=df.index)).fillna(0).values
+
+            upside = q95 - q50
+            downside = q50 - q05
+
+            # Go long if more upside than downside (and downside > 0)
+            skew_condition = (downside > 0) & (upside > downside)
+            signals = np.where(valid_mask & skew_condition, 1, 0)
+
+        df["signal"] = signals
         return df

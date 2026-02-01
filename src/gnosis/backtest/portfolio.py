@@ -68,34 +68,62 @@ class PortfolioTracker:
 
         realized_pnl = 0.0
 
+        actual_qty = fill.quantity  # Track actual quantity for trade log
+        actual_notional = fill.notional  # Track actual notional for trade log
+
         if fill.side == "BUY":
+            # Calculate total cost for this buy
+            total_cost = fill.notional + fill.fee
+
+            # Safety check: don't let cash go negative
+            # If order would exceed cash, reduce quantity proportionally
+            if total_cost > self._cash and self._cash > 0:
+                # Scale down to fit available cash (with small safety margin)
+                scale = (self._cash / total_cost) * 0.999
+                actual_qty = fill.quantity * scale
+                actual_notional = actual_qty * fill.price
+                actual_fee = actual_notional * (fill.fee / fill.notional) if fill.notional > 0 else 0
+                total_cost = actual_notional + actual_fee
+            elif self._cash <= 0:
+                # No cash available, skip this buy
+                return 0.0
+            else:
+                actual_qty = fill.quantity
+                actual_notional = fill.notional
+                total_cost = fill.notional + fill.fee
+
             # Buying increases position
-            new_pos = current_pos + fill.quantity
+            new_pos = current_pos + actual_qty
             # Update average entry price
             if current_pos <= 0:
                 # Opening new long position
                 self._entry_prices[fill.symbol] = fill.price
             else:
                 # Adding to existing long
-                total_cost = current_pos * entry_price + fill.quantity * fill.price
-                self._entry_prices[fill.symbol] = total_cost / new_pos
+                prev_cost = current_pos * entry_price
+                self._entry_prices[fill.symbol] = (prev_cost + actual_notional) / new_pos if new_pos > 0 else fill.price
             self._positions[fill.symbol] = new_pos
-            self._cash -= fill.notional + fill.fee
+            self._cash -= total_cost
         else:
             # Selling decreases position
             if current_pos > 0:
                 # Closing or reducing long position
+                # Clamp sell quantity to current position (no shorting in long-only mode)
                 sell_qty = min(fill.quantity, current_pos)
+                actual_qty = sell_qty
                 realized_pnl = sell_qty * (fill.price - entry_price) - fill.fee
-                new_pos = current_pos - fill.quantity
+                new_pos = current_pos - sell_qty
                 if new_pos <= 0:
                     # Position fully closed
                     self._entry_prices.pop(fill.symbol, None)
                 self._positions[fill.symbol] = max(0.0, new_pos)
+                # Cash is based on actual sell quantity, not requested quantity
+                actual_notional = sell_qty * fill.price
+                self._cash += actual_notional - fill.fee
             else:
                 # No position to sell (shouldn't happen in long-only)
-                new_pos = 0.0
-            self._cash += fill.notional - fill.fee
+                actual_qty = 0.0
+                # No cash change if nothing to sell
 
         self._fills.append(fill)
         self._trade_pnls.append(
@@ -105,10 +133,10 @@ class PortfolioTracker:
                 "decision_bar_idx": fill.decision_bar_idx,  # Bar where decision was made
                 "fill_bar_idx": fill.bar_idx,  # Bar where fill occurred
                 "side": fill.side,
-                "quantity": fill.quantity,
+                "quantity": actual_qty,  # Actual quantity traded (clamped for SELL)
                 "price": fill.price,
                 "fee": fill.fee,
-                "notional": fill.notional,
+                "notional": actual_qty * fill.price,  # Actual notional
                 "pnl": realized_pnl,
             }
         )

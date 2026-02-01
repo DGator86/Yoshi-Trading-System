@@ -50,12 +50,15 @@ class PositionManager:
             return 0.0
 
         # Apply cost buffer to prevent over-allocation
+        # Buffer accounts for spread + fees that will be deducted on execution
         cost_factor = 1 + self.config.cost_buffer_bps / 10000
-        adjusted_price = price * cost_factor
 
-        # Cap at available cash if provided
+        # Cap at available cash if provided (apply buffer to cash, not to both)
         if available_cash is not None and available_cash > 0:
-            max_notional = available_cash / cost_factor
-            target_notional = min(target_notional, max_notional)
+            # Available notional after reserving for costs
+            available_notional = available_cash / cost_factor
+            target_notional = min(target_notional, available_notional)
 
-        return target_notional / adjusted_price
+        # Convert notional to quantity at current price
+        # (don't apply cost_factor again - it's already in the notional cap)
+        return target_notional / price

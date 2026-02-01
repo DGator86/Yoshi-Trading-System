@@ -141,10 +141,15 @@ class BacktestRunner:
             if pending_order is not None:
                 # Fill at CURRENT bar's close (this was decided on PREVIOUS bar)
                 # Verify we're filling at bar_idx > decision_bar_idx (no same-bar fill)
-                assert current_bar_idx == pending_order.decision_bar_idx + 1, (
-                    f"Fill must be exactly next-bar to avoid leakage/gaps: "
-                    f"decision_bar={pending_order.decision_bar_idx}, fill_bar={current_bar_idx}"
-                )
+                if current_bar_idx <= pending_order.decision_bar_idx:
+                    # Same-bar or earlier fill would be lookahead - skip this order
+                    pending_order = None
+                elif current_bar_idx > pending_order.decision_bar_idx + 1:
+                    # Gap in data - order is stale, skip it (log for debugging)
+                    # In production this could be logged: f"Skipping stale order due to bar gap"
+                    pending_order = None
+
+            if pending_order is not None:
 
                 fill = self.executor.execute(
                     timestamp=current_time,

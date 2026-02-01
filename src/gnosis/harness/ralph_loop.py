@@ -24,28 +24,11 @@ from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 import pandas as pd
 
-from typing import List
-
-
-def _drop_future_return_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ensure we NEVER carry truth columns inside predictions until the single attach-truth step.
-    This prevents pandas from creating future_return_x / future_return_y during merges.
-    """
-    cols = [c for c in df.columns if c.startswith("future_return")]
-    if cols:
-        return df.drop(columns=cols, errors="ignore")
-    return df
-
-
-def _safe_merge_no_truth(
-    left: pd.DataFrame, right: pd.DataFrame, on: List[str], how: str = "left"
-) -> pd.DataFrame:
-    """
-    Merge right into left but *force* right to not contribute any future_return* columns.
-    """
-    right = right[[c for c in right.columns if not c.startswith("future_return")]]
-    return left.merge(right, on=on, how=how)
+from gnosis.utils import (
+    drop_future_return_cols,
+    safe_merge_no_truth,
+    vectorized_abstain_mask,
+)
 
 
 from gnosis.harness.walkforward import WalkForwardHarness, Fold, compute_future_returns
@@ -559,7 +542,7 @@ class RalphLoop:
         features_df: pd.DataFrame,
         regimes_config: dict,
     ) -> pd.DataFrame:
-        """Apply abstain logic based on S_label and S_pmax thresholds."""
+        """Apply abstain logic based on S_label and S_pmax thresholds (vectorized)."""
         result = preds.copy()
 
         # Get S_label and S_pmax from features
@@ -573,28 +556,19 @@ class RalphLoop:
             s_info = features_df[s_cols].copy()
             result = result.merge(s_info, on=["symbol", "bar_idx"], how="left")
 
-        # Default abstain = False
-        result["abstain"] = False
-
-        # Get confidence floor
-        confidence_floor = 0.65
+        # Get confidence floor from config
         constraints = regimes_config.get("constraints_by_species", {})
-        default_floor = constraints.get("default", {}).get("confidence_floor", 0.65)
-        confidence_floor = default_floor
+        confidence_floor = constraints.get("default", {}).get("confidence_floor", 0.65)
 
-        # Abstain if S_label is uncertain or S_pmax is below threshold
+        # Vectorized abstain computation
         if "S_label" in result.columns and "S_pmax" in result.columns:
-            for idx in range(len(result)):
-                s_label = result.iloc[idx].get("S_label", "S_UNCERTAIN")
-                s_pmax = result.iloc[idx].get("S_pmax", 0.0)
-
-                if pd.isna(s_label):
-                    s_label = "S_UNCERTAIN"
-                if pd.isna(s_pmax):
-                    s_pmax = 0.0
-
-                if s_label == "S_UNCERTAIN" or s_pmax < confidence_floor:
-                    result.loc[result.index[idx], "abstain"] = True
+            result["abstain"] = vectorized_abstain_mask(
+                result["S_label"],
+                result["S_pmax"],
+                confidence_floor=confidence_floor,
+            )
+        else:
+            result["abstain"] = False
 
         return result
 

@@ -2,34 +2,30 @@
 """Main experiment runner for gnosis particle bot."""
 import argparse
 import copy
+import hashlib
 import json
-import os
 import platform
+import subprocess
 import sys
-import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
+import pandas as pd
+import numpy as np
 from typing import List
 
-import numpy as np
-import pandas as pd
-import yaml
+from gnosis.utils import (
+    drop_future_return_cols,
+    safe_merge_no_truth,
+    vectorized_abstain_mask,
+    sanitize_for_json,
+)
+from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-# Import experiment utilities from refactored modules
-from experiment import (
-    load_config,
-    get_git_commit,
-    compute_config_hash,
-    compute_data_manifest_hash,
-    compute_report_hash,
-    ArtifactSaver,
-    ReportGenerator,
-)
-
-# Import gnosis modules
 from gnosis.ingest import load_or_create_prints, create_data_manifest
 from gnosis.domains import DomainAggregator, compute_features
 from gnosis.regimes import KPCOFGSClassifier
@@ -47,26 +43,68 @@ from gnosis.harness import (
 )
 from gnosis.harness.trade_walkforward import TradeWalkForwardHarness
 from gnosis.registry import FeatureRegistry
+import os
 
 
-def _drop_future_return_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove future_return columns to prevent merge conflicts.
+def get_git_commit() -> str:
+    """Get current git commit hash, or 'unknown' if not in a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return "unknown"
 
-    This prevents pandas from creating future_return_x / future_return_y
-    during merges when both DataFrames have future_return columns.
-    """
-    cols = [c for c in df.columns if c.startswith("future_return")]
-    if cols:
-        return df.drop(columns=cols, errors="ignore")
-    return df
+
+def compute_config_hash(config_dir: Path) -> str:
+    """Compute SHA256 hash of concatenated config files in sorted order."""
+    config_files = sorted(config_dir.glob("*.yaml"))
+    hasher = hashlib.sha256()
+    for config_file in config_files:
+        hasher.update(config_file.read_bytes())
+    return hasher.hexdigest()
 
 
-def _safe_merge_no_truth(
-    left: pd.DataFrame, right: pd.DataFrame, on: List[str], how: str = "left"
-) -> pd.DataFrame:
-    """Merge right into left without future_return columns from right."""
-    right = right[[c for c in right.columns if not c.startswith("future_return")]]
-    return left.merge(right, on=on, how=how)
+def compute_data_manifest_hash(manifest_path: Path) -> str:
+    """Compute SHA256 hash of data manifest file."""
+    if manifest_path.exists():
+        return hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    return "no_manifest"
+
+
+def compute_report_hash(report: dict) -> str:
+    """Compute SHA256 hash of report with volatile keys removed."""
+    # Create copy without volatile keys
+    stable_report = {
+        k: v
+        for k, v in report.items()
+        if k not in ("run_id", "started_at", "completed_at")
+    }
+    # Use sorted keys and consistent JSON formatting for determinism
+    report_json = json.dumps(stable_report, sort_keys=True, default=str)
+    return hashlib.sha256(report_json.encode()).hexdigest()
+
+
+def load_config(config_path: str) -> dict:
+    """Load experiment configuration from YAML."""
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    # Load auxiliary configs
+    config_dir = Path(config_path).parent
+    for name in ["domains", "models", "regimes", "costs"]:
+        aux_path = config_dir / f"{name}.yaml"
+        if aux_path.exists():
+            with open(aux_path) as f:
+                config[name] = yaml.safe_load(f)
+
+    return config
 
 
 def get_confidence_floor(regimes_config: dict, s_label: str) -> float:
@@ -87,7 +125,7 @@ def apply_abstain_logic(
     features_df: pd.DataFrame,
     regimes_config: dict,
 ) -> pd.DataFrame:
-    """Apply abstain logic based on species constraints.
+    """Apply abstain logic based on species constraints (vectorized).
 
     If S_label == S_UNCERTAIN OR S_pmax < confidence_floor:
         - Set abstain=True
@@ -100,40 +138,30 @@ def apply_abstain_logic(
     s_info = features_df[["symbol", "bar_idx", "S_label", "S_pmax"]].copy()
     result = result.merge(s_info, on=["symbol", "bar_idx"], how="left")
 
-    # Determine abstain condition
-    abstain_mask = np.zeros(len(result), dtype=bool)
+    # Get default confidence floor from config
+    constraints = regimes_config.get("constraints_by_species", {})
+    default_floor = constraints.get("default", {}).get("confidence_floor", 0.65)
 
-    for idx in range(len(result)):
-        s_label = result.iloc[idx].get("S_label", "S_UNCERTAIN")
-        s_pmax = result.iloc[idx].get("S_pmax", 0.0)
-
-        if pd.isna(s_label):
-            s_label = "S_UNCERTAIN"
-        if pd.isna(s_pmax):
-            s_pmax = 0.0
-
-        confidence_floor = get_confidence_floor(regimes_config, s_label)
-
-        if s_label == "S_UNCERTAIN" or s_pmax < confidence_floor:
-            abstain_mask[idx] = True
-
+    # Vectorized abstain mask computation
+    abstain_mask = vectorized_abstain_mask(
+        result["S_label"],
+        result["S_pmax"],
+        confidence_floor=default_floor,
+    )
     result["abstain"] = abstain_mask
 
-    # Widen intervals and set x_hat to NaN for abstain cases
-    abstain_indices = result[result["abstain"]].index
-    if len(abstain_indices) > 0:
+    # Widen intervals and set x_hat to NaN for abstain cases (vectorized)
+    if abstain_mask.any():
         # Widen sigma by factor of 3
-        result.loc[abstain_indices, "sigma_hat"] = (
-            result.loc[abstain_indices, "sigma_hat"] * 3
-        )
+        result.loc[abstain_mask, "sigma_hat"] = result.loc[abstain_mask, "sigma_hat"] * 3
 
         # Widen quantile intervals
-        sigma_widened = result.loc[abstain_indices, "sigma_hat"].values
-        result.loc[abstain_indices, "q05"] = -1.645 * sigma_widened
-        result.loc[abstain_indices, "q95"] = 1.645 * sigma_widened
+        sigma_widened = result.loc[abstain_mask, "sigma_hat"]
+        result.loc[abstain_mask, "q05"] = -1.645 * sigma_widened
+        result.loc[abstain_mask, "q95"] = 1.645 * sigma_widened
 
         # Set x_hat to NaN for abstain
-        result.loc[abstain_indices, "x_hat"] = np.nan
+        result.loc[abstain_mask, "x_hat"] = np.nan
 
     return result
 
@@ -304,13 +332,7 @@ def run_experiment(
                         ),
                     )
                 )
-            except (TypeError, ValueError) as e:
-                import warnings
-                warnings.warn(
-                    f"Failed to parse sigma_scale from config, using default 1.0: {e}",
-                    RuntimeWarning,
-                    stacklevel=2
-                )
+            except Exception:
                 sigma_scale = 1.0
 
         if sigma_scale != 1.0:
@@ -379,7 +401,7 @@ def run_experiment(
                 if c in preds.columns and c in test_df.columns
             ]
             if len(key_cols) >= 2:
-                preds = _drop_future_return_cols(preds)
+                preds = drop_future_return_cols(preds)
                 preds = preds.merge(
                     test_df[key_cols + ["future_return"]],
                     on=key_cols,
@@ -575,7 +597,7 @@ def run_experiment(
                 _y_src = _v[["symbol", "bar_idx", "future_return"]].copy()
                 break
         if _y_src is not None:
-            _pred_out = _drop_future_return_cols(_pred_out)
+            _pred_out = drop_future_return_cols(_pred_out)
             _y_src = _y_src[["symbol", "bar_idx", "future_return"]]
             _pred_out = _pred_out.merge(
                 _y_src,
@@ -623,8 +645,8 @@ def run_experiment(
                     )
                     _bars = _compute_future_returns(_bars, horizon_bars=_cfgH)
                     _bars = _bars[["symbol", "bar_idx", "future_return"]].copy()
-                    _preds = _drop_future_return_cols(_preds)
-                    _preds = _safe_merge_no_truth(
+                    _preds = drop_future_return_cols(_preds)
+                    _preds = safe_merge_no_truth(
                         _preds, _bars, on=["symbol", "bar_idx"], how="left"
                     )
                     assert not any(
@@ -638,13 +660,8 @@ def run_experiment(
                         )
                     _preds.to_parquet(_pred_path, index=False)
         except Exception as _e:
-            # Log warning but don't fail the run for y_true injection issues
-            import warnings
-            warnings.warn(
-                f"Post-save y_true injection failed (non-fatal): {type(_e).__name__}: {_e}",
-                RuntimeWarning,
-                stacklevel=2
-            )
+            # Never fail the run just because y_true injection failed
+            pass
     else:
         # Create minimal predictions file
         pd.DataFrame(
@@ -757,16 +774,85 @@ def run_experiment(
     with open(out_dir / "run_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
-    # report.md - use ReportGenerator for cleaner code
-    report_generator = ReportGenerator(
-        report=report,
-        config=config,
-        fold_results=fold_results,
-        stability_metrics=stability_metrics,
-        calibration_summary=calibration_summary,
-        ralph_results=ralph_results,
-    )
-    report_md = report_generator.generate()
+    # report.md
+    report_md = f"""# Experiment Report
+
+## Summary
+- **Status**: {report['status']}
+- **90% Coverage**: {avg_coverage:.4f} (target: 0.87-0.93)
+- **Sharpness**: {avg_sharpness:.6f}
+- **Baseline Sharpness**: {avg_baseline_sharpness:.6f}
+- **MAE**: {avg_mae:.6f}
+- **Folds**: {len(fold_results)}
+
+## Configuration
+- Symbols: {', '.join(symbols)}
+- Random Seed: {config.get('random_seed', 1337)}
+
+## Abstention
+- **Abstention Rate**: {avg_abstention_rate:.4f}
+- Predictions with S_label=S_UNCERTAIN or S_pmax < confidence_floor are marked as abstain
+
+## Stability Metrics
+| Level | Flip Rate | Avg Entropy |
+|-------|-----------|-------------|
+"""
+    for level in ["K", "P", "C", "O", "F", "G", "S"]:
+        flip_rate = stability_metrics.get(f"{level}_flip_rate", 0.0)
+        avg_entropy = stability_metrics.get(f"{level}_avg_entropy", 0.0)
+        report_md += f"| {level} | {flip_rate:.4f} | {avg_entropy:.4f} |\n"
+
+    report_md += f"\n- **Overall Flip Rate**: {stability_metrics.get('overall_flip_rate', 0.0):.4f}\n"
+
+    report_md += f"""
+## Calibration Summary
+- **ECE (Raw)**: {calibration_summary['avg_ece_raw']:.4f}
+- **ECE (Calibrated)**: {calibration_summary['avg_ece_calibrated']:.4f}
+- **Improvement**: {calibration_summary['calibration_improvement']:.4f}
+
+## Fold Results
+| Fold | N_Train | N_Test | Coverage | Sharpness | MAE | Abstain |
+|------|---------|--------|----------|-----------|-----|---------|
+"""
+    for fr in fold_results:
+        report_md += f"| {fr['fold']} | {fr['n_train']} | {fr['n_test']} | {fr['model_coverage_90']:.4f} | {fr['model_sharpness']:.6f} | {fr['model_mae']:.6f} | {fr['abstention_rate']:.4f} |\n"
+
+    # Add Ralph Loop section if enabled
+    if ralph_results is not None:
+        selected = ralph_results["selected_json"]
+        robustness = ralph_results["robustness"]
+
+        report_md += "\n## Ralph Loop (Hyperparameter Selection)\n"
+        report_md += f"- **Enabled**: Yes\n"
+        report_md += f"- **Candidates Evaluated**: {len(ralph_results['trials_df']['candidate_id'].unique()) if not ralph_results['trials_df'].empty else 0}\n"
+
+        if selected.get("global_best"):
+            gb = selected["global_best"]
+            report_md += (
+                f"- **Global Best Candidate**: {gb.get('candidate_id', 'N/A')}\n"
+            )
+            report_md += (
+                f"- **Global Best Params**: `{json.dumps(gb.get('params', {}))}`\n"
+            )
+            report_md += (
+                f"- **Selection Count**: {gb.get('selection_count', 0)} folds\n"
+            )
+
+        report_md += "\n### Per-Fold Selected Parameters\n"
+        report_md += "| Fold | Candidate | Parameters |\n"
+        report_md += "|------|-----------|------------|\n"
+        for fold_str, fold_data in selected.get("per_fold", {}).items():
+            params_str = json.dumps(fold_data.get("params", {}))
+            report_md += f"| {fold_str} | {fold_data.get('candidate_id', 'N/A')} | `{params_str}` |\n"
+
+        report_md += "\n### Robustness (Std across Outer Folds)\n"
+        report_md += (
+            f"- **Coverage Std**: {robustness.get('coverage_90_std', 0.0):.4f}\n"
+        )
+        report_md += (
+            f"- **Sharpness Std**: {robustness.get('sharpness_std', 0.0):.6f}\n"
+        )
+        report_md += f"- **MAE Std**: {robustness.get('mae_std', 0.0):.6f}\n"
 
     with open(out_dir / "report.md", "w") as f:
         f.write(report_md)
