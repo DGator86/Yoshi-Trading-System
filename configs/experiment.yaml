@@ -4,8 +4,8 @@ symbols:
 - SOLUSDT
 venue: binance_spot
 dataset:
-  mode: parquet  # Use the real data from CCXT repo
-  parquet_dir: data/ccxt_real
+  mode: parquet  # Use extended realistic data
+  parquet_dir: data/ccxt_extended
   # Live data settings (used when mode: live)
   live:
     exchange: binance
@@ -14,10 +14,10 @@ dataset:
     # secret: ${CCXT_SECRET}    # Optional: set via environment variable
 random_seed: 1337
 walkforward:
-  outer_folds: 8
-  train_days: 180
-  val_days: 30
-  test_days: 30
+  outer_folds: 4
+  train_days: 30
+  val_days: 7
+  test_days: 7
   purge_trades: HORIZON
   embargo_trades: HORIZON
 forecast:
