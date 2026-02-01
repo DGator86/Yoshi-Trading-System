@@ -4,8 +4,8 @@ symbols:
 - SOLUSDT
 venue: binance_spot
 dataset:
-  mode: live  # Options: parquet, stub, live
-  parquet_dir: data/live
+  mode: parquet  # Use the real data from CCXT repo
+  parquet_dir: data/ccxt_real
   # Live data settings (used when mode: live)
   live:
     exchange: binance
