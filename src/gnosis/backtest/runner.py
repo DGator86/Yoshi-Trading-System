@@ -179,11 +179,18 @@ class BacktestRunner:
             if idx >= len(symbol_df) - 1:
                 continue
 
-            signal = self.signal_gen.generate_single(row)
+            signal = self.signal_gen.generate_single(
+                row, symbol=symbol, bar_idx=current_bar_idx
+            )
 
             # Compute current equity and available cash for position sizing
             current_equity = portfolio.get_equity({symbol: current_price})
             available_cash = portfolio.cash
+
+            # Get confidence for position sizing
+            confidence = row.get("S_pmax", None)
+            if pd.isna(confidence):
+                confidence = None
 
             # Compute target position based on signal
             target_qty = self.position_mgr.compute_target_position(
@@ -191,6 +198,8 @@ class BacktestRunner:
                 equity=current_equity,
                 price=current_price,
                 available_cash=available_cash,
+                volatility=volatility,
+                confidence=confidence,
             )
 
             # Current position for this symbol
