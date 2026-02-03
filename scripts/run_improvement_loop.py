@@ -28,7 +28,7 @@ from gnosis.harness.improvement_loop import (
 )
 from gnosis.domains import DomainAggregator, compute_features
 from gnosis.regimes import KPCOFGSClassifier
-from gnosis.particle import ParticleState
+from gnosis.particle import ParticleState, PriceParticle
 from gnosis.predictors.quantile import QuantilePredictor
 from gnosis.harness.walkforward import compute_future_returns, WalkForwardHarness
 from gnosis.evaluation.accuracy import PredictionEvaluator
@@ -98,12 +98,17 @@ class YoshiEvaluator:
         classifier = KPCOFGSClassifier(regimes_cfg)
         features_df = classifier.classify(features_df)
 
-        # 4. Compute particle state
+        # 4. Compute particle state (basic)
         models_cfg = config.get("models", {})
         particle = ParticleState(models_cfg)
         features_df = particle.compute_state(features_df)
 
-        # 5. Compute future returns
+        # 5. Compute particle physics features (advanced)
+        physics_config = models_cfg.get("particle_physics", {})
+        price_particle = PriceParticle(physics_config)
+        features_df = price_particle.compute_features(features_df)
+
+        # 6. Compute future returns
         features_df = compute_future_returns(features_df, horizon_bars=self.horizon_bars)
 
         # Sort
@@ -289,10 +294,10 @@ def main():
         },
         "models": {
             "predictor": {
-                "backend": "ridge",
-                "l2_reg": 1.0,
+                "backend": "gradient_boost",  # Best for nonlinear physics features
+                "l2_reg": 0.1,
                 "quantiles": [0.05, 0.50, 0.95],
-                "extended_features": False,
+                "extended_features": True,  # Enable physics features
                 "normalize": True,
             },
             "particle": {
@@ -300,6 +305,11 @@ def main():
                 "flow_weight": 1.0,
                 "regime_weight": 1.0,
                 "barrier_weight": 1.0,
+            },
+            "particle_physics": {
+                "velocity_span": 5,
+                "acceleration_span": 3,
+                "potential_lookback": 50,
             }
         }
     }

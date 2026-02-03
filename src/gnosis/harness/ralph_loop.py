@@ -128,7 +128,7 @@ class FeatureCacheManager:
         # Lazy imports to avoid circular dependencies
         from gnosis.domains import DomainAggregator, compute_features
         from gnosis.regimes import KPCOFGSClassifier
-        from gnosis.particle import ParticleState
+        from gnosis.particle import ParticleState, PriceParticle
 
         # Build domain config with overridden n_trades
         cfg = copy.deepcopy(domain_config)
@@ -145,11 +145,16 @@ class FeatureCacheManager:
         classifier = KPCOFGSClassifier(regimes_config)
         features_df = classifier.classify(features_df)
 
-        # 4. Compute particle state
+        # 4. Compute particle state (basic)
         particle = ParticleState(models_config)
         features_df = particle.compute_state(features_df)
 
-        # 5. Compute future returns (target)
+        # 5. Compute particle physics features (advanced)
+        physics_config = models_config.get("particle_physics", {})
+        price_particle = PriceParticle(physics_config)
+        features_df = price_particle.compute_features(features_df)
+
+        # 6. Compute future returns (target)
         features_df = compute_future_returns(features_df, horizon_bars=horizon_bars)
 
         # Sort for determinism

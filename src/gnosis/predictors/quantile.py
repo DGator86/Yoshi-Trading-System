@@ -28,7 +28,27 @@ EXTENDED_FEATURES = [
     "particle_score",
     # Advanced features (if available)
     "ofi_momentum", "volume_weighted_returns", "price_position",
-    "intrabar_vol", "return_accel", "regime_entropy"
+    "intrabar_vol", "return_accel", "regime_entropy",
+]
+
+# Particle physics features (highest correlation with future returns)
+PHYSICS_FEATURES = [
+    # Kinematics (velocity, acceleration)
+    "velocity", "acceleration", "jerk", "momentum_alignment",
+    # Mass and forces
+    "mass", "force_net", "force_impulse",
+    # Energy states
+    "kinetic_energy", "potential_energy", "energy_injection",
+    # Potential field (support/resistance)
+    "field_gradient", "field_strength",
+    # Mean reversion
+    "mean_reversion_strength", "damping_ratio",
+    # Volume profile
+    "vwap_zscore", "volume_momentum",
+    # Composite scores
+    "momentum_state", "tension_state",
+    "breakout_potential", "reversion_potential",
+    "particle_physics_score",
 ]
 
 
@@ -56,7 +76,8 @@ class QuantilePredictor:
     def _get_features(self, df: pd.DataFrame) -> np.ndarray:
         """Extract feature matrix with optional extended features."""
         if self.use_extended_features:
-            feature_cols = EXTENDED_FEATURES
+            # Include both extended and physics features
+            feature_cols = EXTENDED_FEATURES + PHYSICS_FEATURES
         else:
             feature_cols = [
                 "returns", "realized_vol", "ofi", "range_pct",
@@ -64,8 +85,8 @@ class QuantilePredictor:
                 "particle_score"
             ]
 
-        # Only use columns that exist
-        available = [c for c in feature_cols if c in df.columns]
+        # Only use columns that exist (deduplicate)
+        available = list(dict.fromkeys(c for c in feature_cols if c in df.columns))
         self._feature_cols = available
         X = df[available].fillna(0).values
 
@@ -79,14 +100,16 @@ class QuantilePredictor:
         """Fit quantile models using configured backend."""
         # Determine available features first
         if self.use_extended_features:
-            feature_cols = EXTENDED_FEATURES
+            # Include both extended and physics features
+            feature_cols = EXTENDED_FEATURES + PHYSICS_FEATURES
         else:
             feature_cols = [
                 "returns", "realized_vol", "ofi", "range_pct",
                 "flow_momentum", "regime_stability", "barrier_proximity",
                 "particle_score"
             ]
-        available = [c for c in feature_cols if c in train_df.columns]
+        # Only use columns that exist (deduplicate)
+        available = list(dict.fromkeys(c for c in feature_cols if c in train_df.columns))
         self._feature_cols = available
 
         X = train_df[available].fillna(0).values
