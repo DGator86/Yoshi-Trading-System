@@ -498,13 +498,173 @@ def get_particle_variables() -> List[Variable]:
     ]
 
 
+def get_steering_field_variables() -> List[Variable]:
+    """Get tunable variables for all steering field modules.
+
+    These control the physics-inspired prediction engine:
+    - Funding rate aggregation
+    - Liquidation cascade dynamics
+    - Gamma fields (options)
+    - Cross-asset coupling (macro)
+    - Time-of-day effects
+    - Order book depth analysis
+    """
+    variables = []
+
+    # === FUNDING RATE VARIABLES ===
+    variables.extend([
+        Variable(
+            name="funding_strength_base",
+            path="particle.funding.funding_strength_base",
+            current_value=12.0,
+            candidates=[6.0, 9.0, 12.0, 15.0, 18.0, 24.0],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="funding_ema_alpha",
+            path="particle.funding.ema_alpha",
+            current_value=0.3,
+            candidates=[0.1, 0.2, 0.3, 0.5, 0.7],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="funding_weight_binance",
+            path="particle.funding.weight_binance",
+            current_value=0.50,
+            candidates=[0.3, 0.4, 0.5, 0.6, 0.7],
+            variable_type="continuous",
+        ),
+    ])
+
+    # === LIQUIDATION VARIABLES ===
+    variables.extend([
+        Variable(
+            name="liq_repulsion_strength",
+            path="particle.liquidation.repulsion_strength",
+            current_value=1e-6,
+            candidates=[5e-7, 1e-6, 2e-6, 5e-6],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="liq_cascade_strength",
+            path="particle.liquidation.cascade_strength",
+            current_value=1e-5,
+            candidates=[5e-6, 1e-5, 2e-5, 5e-5],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="liq_repulsion_zone_pct",
+            path="particle.liquidation.repulsion_zone_pct",
+            current_value=0.01,
+            candidates=[0.005, 0.01, 0.015, 0.02],
+            variable_type="continuous",
+        ),
+    ])
+
+    # === GAMMA FIELD VARIABLES ===
+    variables.extend([
+        Variable(
+            name="gamma_strength",
+            path="particle.gamma.gamma_strength",
+            current_value=0.001,
+            candidates=[0.0005, 0.001, 0.002, 0.005],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="gamma_max_pain_strength",
+            path="particle.gamma.max_pain_strength",
+            current_value=0.0005,
+            candidates=[0.0002, 0.0005, 0.001, 0.002],
+            variable_type="continuous",
+        ),
+    ])
+
+    # === MACRO COUPLING VARIABLES ===
+    variables.extend([
+        Variable(
+            name="macro_beta_spx",
+            path="particle.macro.beta_spx",
+            current_value=0.3,
+            candidates=[0.1, 0.2, 0.3, 0.4, 0.5],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="macro_beta_dxy",
+            path="particle.macro.beta_dxy",
+            current_value=-0.2,
+            candidates=[-0.4, -0.3, -0.2, -0.1, 0.0],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="macro_force_strength",
+            path="particle.macro.macro_force_strength",
+            current_value=0.5,
+            candidates=[0.2, 0.3, 0.5, 0.7, 1.0],
+            variable_type="continuous",
+        ),
+    ])
+
+    # === TEMPORAL VARIABLES ===
+    variables.extend([
+        Variable(
+            name="temporal_us_vol_mult",
+            path="particle.temporal.us_vol_mult",
+            current_value=1.3,
+            candidates=[1.0, 1.2, 1.3, 1.5, 1.7],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="temporal_overlap_vol_mult",
+            path="particle.temporal.overlap_vol_mult",
+            current_value=1.4,
+            candidates=[1.2, 1.4, 1.6, 1.8],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="temporal_recent_vol_weight",
+            path="particle.temporal.recent_vol_weight",
+            current_value=0.3,
+            candidates=[0.1, 0.2, 0.3, 0.4, 0.5],
+            variable_type="continuous",
+        ),
+    ])
+
+    # === ORDER BOOK VARIABLES ===
+    variables.extend([
+        Variable(
+            name="ob_imbalance_strength",
+            path="particle.orderbook.imbalance_strength",
+            current_value=0.08,
+            candidates=[0.04, 0.06, 0.08, 0.10, 0.12],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="ob_weight_level_1",
+            path="particle.orderbook.weight_level_1",
+            current_value=0.40,
+            candidates=[0.3, 0.4, 0.5, 0.6],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="ob_flow_ema_alpha",
+            path="particle.orderbook.flow_ema_alpha",
+            current_value=0.2,
+            candidates=[0.1, 0.2, 0.3, 0.5],
+            variable_type="continuous",
+        ),
+    ])
+
+    return variables
+
+
 def get_all_variables() -> List[Variable]:
     """Get all tunable variables."""
     return (
         get_predictor_variables() +
         get_domain_variables() +
         get_regime_variables() +
-        get_particle_variables()
+        get_particle_variables() +
+        get_steering_field_variables()
     )
 
 

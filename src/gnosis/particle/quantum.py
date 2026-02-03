@@ -5,16 +5,21 @@ Treats price as a particle moving through steering fields:
 - Liquidation cascade fields (potential wells with avalanche dynamics)
 - Order book gradient fields (gravitational attraction to liquidity)
 - Cross-asset coupling fields (external forces)
+- Gamma fields (options market maker hedging)
+- Time-of-day effects (intraday volatility patterns)
 
 Implements regime-switching dynamics where physics parameters
 vary based on market state (trending, ranging, volatile).
 
 Outputs probabilistic forecasts with confidence intervals.
+
+All steering field parameters are exposed as hyperparameters for ML tuning.
 """
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
 from enum import Enum
 
 
@@ -693,3 +698,349 @@ def compute_quantum_features(df: pd.DataFrame, config: Optional[Dict] = None) ->
     result["regime_stability"] = 1.0 - result["regime_change"].rolling(20).mean()
 
     return result
+
+
+class EnhancedQuantumEngine(QuantumPriceEngine):
+    """Enhanced quantum engine integrating all steering field modules.
+
+    This class extends QuantumPriceEngine to incorporate:
+    - Cross-exchange funding aggregation
+    - Liquidation heatmaps
+    - Gamma fields from options
+    - Cross-asset coupling (SPX/DXY)
+    - Time-of-day volatility effects
+    - Multi-level order book analysis
+
+    All components expose ML-tunable hyperparameters.
+    """
+
+    def __init__(
+        self,
+        n_simulations: int = 10000,
+        random_seed: Optional[int] = None,
+        configs: Optional[Dict[str, Any]] = None,
+    ):
+        """Initialize enhanced engine with all steering field modules.
+
+        Args:
+            n_simulations: Number of Monte Carlo paths
+            random_seed: Random seed for reproducibility
+            configs: Dict of configs for each module:
+                - funding: FundingConfig
+                - liquidation: LiquidationConfig
+                - gamma: GammaConfig
+                - macro: MacroCouplingConfig
+                - temporal: TemporalConfig
+                - orderbook: OrderBookConfig
+        """
+        super().__init__(n_simulations, random_seed)
+
+        configs = configs or {}
+
+        # Import modules here to avoid circular imports
+        from .funding import FundingRateAggregator, FundingConfig
+        from .liquidations import LiquidationHeatmap, LiquidationConfig
+        from .gamma import GammaFieldCalculator, GammaConfig
+        from .macro import CrossAssetCoupling, MacroCouplingConfig
+        from .temporal import TimeOfDayEffects, TemporalConfig
+        from .orderbook import MultiLevelOrderBookAnalyzer, OrderBookConfig
+
+        # Initialize all steering field modules
+        self.funding_aggregator = FundingRateAggregator(
+            configs.get('funding', FundingConfig())
+        )
+        self.liquidation_heatmap = LiquidationHeatmap(
+            configs.get('liquidation', LiquidationConfig())
+        )
+        self.gamma_calculator = GammaFieldCalculator(
+            configs.get('gamma', GammaConfig())
+        )
+        self.macro_coupling = CrossAssetCoupling(
+            configs.get('macro', MacroCouplingConfig())
+        )
+        self.temporal_effects = TimeOfDayEffects(
+            configs.get('temporal', TemporalConfig())
+        )
+        self.orderbook_analyzer = MultiLevelOrderBookAnalyzer(
+            configs.get('orderbook', OrderBookConfig())
+        )
+
+    def predict_enhanced(
+        self,
+        df: pd.DataFrame,
+        horizon_minutes: int = 60,
+        funding_rates: Optional[Dict[str, float]] = None,
+        orderbook: Optional[Dict[str, List]] = None,
+        liquidation_levels: Optional[List[Tuple[float, float, float]]] = None,
+        options_oi: Optional[float] = None,
+        btc_returns: Optional[pd.Series] = None,
+        current_time: Optional[datetime] = None,
+    ) -> PredictionResult:
+        """Generate enhanced probabilistic prediction using all steering fields.
+
+        Args:
+            df: DataFrame with OHLCV data
+            horizon_minutes: Prediction horizon in minutes
+            funding_rates: Dict of exchange -> funding rate
+            orderbook: Dict with 'bids' and 'asks' lists
+            liquidation_levels: List of (price, long_vol, short_vol)
+            options_oi: Options open interest (for gamma estimation)
+            btc_returns: BTC return series for macro correlation
+            current_time: Current datetime for temporal effects
+
+        Returns:
+            PredictionResult with point estimate and confidence intervals
+        """
+        current_price = float(df["close"].iloc[-1])
+        current_time = current_time or datetime.now()
+
+        # Detect regime
+        regime = self.detect_regime(df)
+        regime_str = regime.value
+        params = self.REGIME_PARAMS[regime]
+
+        # Initialize forces
+        forces = SteeringForces()
+
+        # === 1. FUNDING FORCE (Cross-Exchange Aggregated) ===
+        if funding_rates:
+            funding_result = self.funding_aggregator.aggregate(funding_rates, regime_str)
+            forces.funding_force = funding_result['funding_force']
+        else:
+            forces.funding_force = 0.0
+
+        # === 2. ORDER BOOK IMBALANCE (Multi-Level) ===
+        if orderbook and orderbook.get('bids') and orderbook.get('asks'):
+            snapshot = self.orderbook_analyzer.process_snapshot(
+                orderbook['bids'],
+                orderbook['asks'],
+            )
+            ob_result = self.orderbook_analyzer.calculate_force(snapshot, regime_str)
+            forces.imbalance_force = ob_result['imbalance_force']
+            forces.gravity_force = ob_result['gravity_force']
+        else:
+            # Fallback to simple calculation
+            bid_volume = df.get('bid_volume', pd.Series([0])).iloc[-1] if 'bid_volume' in df else 0
+            ask_volume = df.get('ask_volume', pd.Series([0])).iloc[-1] if 'ask_volume' in df else 0
+            forces.imbalance_force = self.calculate_order_book_imbalance(
+                bid_volume, ask_volume, params
+            )
+
+        # === 3. LIQUIDATION CASCADE FORCE ===
+        if liquidation_levels:
+            from .liquidations import LiquidationLevel
+            levels = [
+                LiquidationLevel(price=p, long_volume=lv, short_volume=sv)
+                for p, lv, sv in liquidation_levels
+            ]
+            self.liquidation_heatmap.update_levels(levels)
+            liq_result = self.liquidation_heatmap.calculate_force(current_price, regime_str)
+            forces.liquidation_force = liq_result['liquidation_force']
+        elif options_oi:
+            # Estimate from futures OI
+            self.liquidation_heatmap.estimate_from_leverage_distribution(
+                current_price, options_oi
+            )
+            liq_result = self.liquidation_heatmap.calculate_force(current_price, regime_str)
+            forces.liquidation_force = liq_result['liquidation_force']
+        else:
+            forces.liquidation_force = 0.0
+
+        # === 4. GAMMA FORCE (Options Market) ===
+        if options_oi:
+            self.gamma_calculator.estimate_from_futures_oi(current_price, options_oi)
+            gamma_result = self.gamma_calculator.calculate_force(current_price, regime_str)
+            gamma_force = gamma_result['total_gamma_force']
+        else:
+            gamma_force = 0.0
+
+        # === 5. MACRO COUPLING FORCE (SPX/DXY) ===
+        if btc_returns is not None and len(btc_returns) > 100:
+            macro_result = self.macro_coupling.calculate_macro_drift(
+                btc_returns, current_time, regime_str
+            )
+            macro_force = macro_result['macro_drift']
+        else:
+            macro_force = 0.0
+
+        # === 6. SPRING FORCE (VWAP Mean Reversion) ===
+        if "volume" in df.columns:
+            vwap = (df["close"] * df["volume"]).tail(50).sum() / df["volume"].tail(50).sum()
+        else:
+            vwap = df["close"].tail(50).mean()
+        forces.spring_force = self.calculate_spring_force(current_price, vwap, params)
+
+        # === 7. MOMENTUM FORCE (Multi-Scale) ===
+        returns = df["close"].pct_change() if "returns" not in df.columns else df["returns"]
+        momentum_scales = {
+            "1m": returns.tail(5).mean() if len(returns) >= 5 else 0,
+            "5m": returns.tail(15).mean() if len(returns) >= 15 else 0,
+            "15m": returns.tail(45).mean() if len(returns) >= 45 else 0,
+            "1h": returns.tail(60).mean() if len(returns) >= 60 else 0,
+        }
+        forces.momentum_force = self.calculate_momentum_force(momentum_scales, params)
+
+        # === 8. TIME-OF-DAY EFFECTS ===
+        recent_vol = returns.tail(60).std() if len(returns) >= 60 else params.volatility_base
+        temporal_result = self.temporal_effects.calculate_combined_multiplier(
+            current_time, recent_vol
+        )
+        vol_multiplier = temporal_result['combined_multiplier']
+        temporal_bias = temporal_result['directional_bias']
+
+        # === 9. FRICTION FORCE ===
+        # Include additional forces in total before friction
+        total_before_friction = (
+            forces.funding_force +
+            forces.imbalance_force +
+            forces.gravity_force +
+            forces.spring_force +
+            forces.liquidation_force +
+            forces.momentum_force +
+            gamma_force +
+            macro_force +
+            temporal_bias
+        )
+        forces.friction_force = -params.drag_coefficient * total_before_friction * 0.1
+
+        # === VOLATILITY FORECAST ===
+        current_vol = returns.tail(60).std() if len(returns) >= 60 else params.volatility_base
+        volatility = self.forecast_volatility(returns, current_vol, params)
+        # Apply time-of-day multiplier and floor
+        volatility = max(volatility * vol_multiplier, self.VOLATILITY_FLOOR)
+        volatility *= np.sqrt(horizon_minutes / 60)
+
+        # === ADD EXTRA FORCES TO TOTAL ===
+        # These aren't in SteeringForces dataclass but contribute to drift
+        extra_drift = gamma_force + macro_force + temporal_bias
+
+        # Create modified forces for simulation
+        sim_forces = SteeringForces(
+            funding_force=forces.funding_force,
+            imbalance_force=forces.imbalance_force,
+            gravity_force=forces.gravity_force,
+            spring_force=forces.spring_force,
+            depth_pressure=extra_drift,  # Use depth_pressure to carry extra forces
+            momentum_force=forces.momentum_force,
+            liquidation_force=forces.liquidation_force,
+            friction_force=forces.friction_force,
+        )
+
+        # === RUN MONTE CARLO SIMULATION ===
+        final_prices = self.simulate_paths(
+            current_price=current_price,
+            forces=sim_forces,
+            volatility=volatility,
+            params=params,
+            n_steps=horizon_minutes,
+        )
+
+        # === COMPUTE RESULTS ===
+        point_estimate = float(np.median(final_prices))
+        mean_estimate = float(np.mean(final_prices))
+        probability_up = float(np.mean(final_prices > current_price))
+
+        confidence_intervals = {
+            "50%": (float(np.percentile(final_prices, 25)), float(np.percentile(final_prices, 75))),
+            "68%": (float(np.percentile(final_prices, 16)), float(np.percentile(final_prices, 84))),
+            "80%": (float(np.percentile(final_prices, 10)), float(np.percentile(final_prices, 90))),
+            "90%": (float(np.percentile(final_prices, 5)), float(np.percentile(final_prices, 95))),
+            "95%": (float(np.percentile(final_prices, 2.5)), float(np.percentile(final_prices, 97.5))),
+            "99%": (float(np.percentile(final_prices, 0.5)), float(np.percentile(final_prices, 99.5))),
+        }
+
+        simulation_stats = {
+            "mean": mean_estimate,
+            "std": float(np.std(final_prices)),
+            "skew": float(pd.Series(final_prices).skew()),
+            "kurtosis": float(pd.Series(final_prices).kurtosis()),
+            "min": float(np.min(final_prices)),
+            "max": float(np.max(final_prices)),
+            "gamma_force": gamma_force,
+            "macro_force": macro_force,
+            "temporal_bias": temporal_bias,
+            "vol_multiplier": vol_multiplier,
+        }
+
+        return PredictionResult(
+            current_price=current_price,
+            regime=regime,
+            point_estimate=point_estimate,
+            expected_return_pct=(point_estimate / current_price - 1) * 100,
+            probability_up=probability_up,
+            confidence_intervals=confidence_intervals,
+            forces=forces,
+            simulation_stats=simulation_stats,
+        )
+
+    def get_all_features(
+        self,
+        df: pd.DataFrame,
+        funding_rates: Optional[Dict[str, float]] = None,
+        orderbook: Optional[Dict[str, List]] = None,
+        current_time: Optional[datetime] = None,
+    ) -> Dict[str, float]:
+        """Get all features from all steering field modules.
+
+        Useful for ML models that need feature vectors.
+
+        Args:
+            df: DataFrame with OHLCV data
+            funding_rates: Funding rates by exchange
+            orderbook: Order book data
+            current_time: Current datetime
+
+        Returns:
+            Dict of all features
+        """
+        features = {}
+        current_price = float(df["close"].iloc[-1])
+        current_time = current_time or datetime.now()
+        regime = self.detect_regime(df)
+        regime_str = regime.value
+
+        # Returns for various calculations
+        returns = df["close"].pct_change() if "returns" not in df.columns else df["returns"]
+        recent_vol = returns.tail(60).std() if len(returns) >= 60 else 0.02
+
+        # Regime features
+        features['regime_trending'] = 1.0 if regime_str == 'trending' else 0.0
+        features['regime_ranging'] = 1.0 if regime_str == 'ranging' else 0.0
+        features['regime_volatile'] = 1.0 if regime_str == 'volatile' else 0.0
+
+        # Funding features
+        if funding_rates:
+            funding_features = self.funding_aggregator.get_funding_features(
+                funding_rates, regime_str
+            )
+            features.update(funding_features)
+
+        # Order book features
+        if orderbook and orderbook.get('bids') and orderbook.get('asks'):
+            snapshot = self.orderbook_analyzer.process_snapshot(
+                orderbook['bids'], orderbook['asks']
+            )
+            ob_features = self.orderbook_analyzer.get_orderbook_features(
+                snapshot, regime_str
+            )
+            features.update(ob_features)
+
+        # Temporal features
+        temporal_features = self.temporal_effects.get_temporal_features(
+            current_time, recent_vol
+        )
+        features.update(temporal_features)
+
+        # Liquidation features (if heatmap has data)
+        liq_features = self.liquidation_heatmap.get_liquidation_features(
+            current_price, regime_str
+        )
+        features.update(liq_features)
+
+        # Gamma features (if data available)
+        gamma_features = self.gamma_calculator.get_gamma_features(
+            current_price, regime_str
+        )
+        features.update(gamma_features)
+
+        return features
