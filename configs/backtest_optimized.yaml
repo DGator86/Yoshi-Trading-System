@@ -1,0 +1,36 @@
+# Optimized backtest configuration with trade filters and risk controls
+# Balanced to reduce trade frequency while maintaining signal flow
+
+backtest:
+  initial_capital: 10000.0
+  random_seed: 1337
+
+  signal:
+    mode: "x_hat_threshold"      # x_hat_threshold, quantile_skew
+    long_threshold: 0.0005       # Go long when x_hat > 0.05% (slightly raised)
+    use_abstain: true            # Respect abstain flag
+    min_confidence: 0.5          # Require S_pmax >= 50%
+
+    # Trade frequency filters
+    min_bars_between_trades: 3   # Wait 3 bars between trades (moderate cooldown)
+    min_signal_strength: 0.0005  # Require |x_hat| >= 0.05%
+
+    # Risk filters (relaxed)
+    max_volatility: 0.0          # Disabled
+    min_reward_risk: 0.0         # Disabled
+
+  position:
+    mode: "vol_adjusted"         # Vol-adjusted position sizing
+    equity_pct: 0.5              # Base: 50% of equity
+    target_risk_pct: 0.02        # Target 2% risk per trade
+    max_position_pct: 0.8        # Max 80% of equity in one position
+    long_only: true
+    cost_buffer_bps: 25.0        # Higher buffer for safety
+    confidence_weight: false     # Disable confidence weighting
+
+  execution:
+    fee_bps: 7.5                 # Taker fee (Binance spot)
+    spread_bps: 2.0              # Half-spread
+    slippage_bps: 0.0            # Base slippage
+    slippage_model: "fixed"      # Fixed slippage (simpler)
+    slippage_k: 0.35             # Vol-proportional factor

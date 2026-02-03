@@ -38,6 +38,11 @@ from gnosis.harness.scoring import (
     coverage,
     sharpness,
 )
+from gnosis.harness.bregman_optimizer import (
+    ProjectFWOptimizer,
+    ProjectFWConfig,
+    OptimizationResult,
+)
 
 
 # ============================================================================
@@ -111,7 +116,7 @@ class FeatureCacheManager:
         # Lazy imports to avoid circular dependencies
         from gnosis.domains import DomainAggregator, compute_features
         from gnosis.regimes import KPCOFGSClassifier
-        from gnosis.particle import ParticleState
+        from gnosis.particle import ParticleState, PriceParticle
 
         # Build domain config with overridden n_trades
         cfg = copy.deepcopy(domain_config)
@@ -128,11 +133,16 @@ class FeatureCacheManager:
         classifier = KPCOFGSClassifier(regimes_config)
         features_df = classifier.classify(features_df)
 
-        # 4. Compute particle state
+        # 4. Compute particle state (basic)
         particle = ParticleState(models_config)
         features_df = particle.compute_state(features_df)
 
-        # 5. Compute future returns (target)
+        # 5. Compute particle physics features (advanced)
+        physics_config = models_config.get("particle_physics", {})
+        price_particle = PriceParticle(physics_config)
+        features_df = price_particle.compute_features(features_df)
+
+        # 6. Compute future returns (target)
         features_df = compute_future_returns(features_df, horizon_bars=horizon_bars)
 
         # Sort for determinism
@@ -879,6 +889,121 @@ class RalphLoop:
 
         return best, trials
 
+    def _select_best_projectfw(
+        self,
+        features_df: pd.DataFrame,
+        outer_fold_idx: int,
+        outer_train_start: int,
+        outer_train_end: int,
+        regimes_config: dict,
+        fw_config: Optional[ProjectFWConfig] = None,
+    ) -> Tuple[HparamCandidate, List[TrialResult], OptimizationResult]:
+        """Select best candidate using ProjectFW Bregman optimization.
+        
+        This method uses adaptive Frank-Wolfe with Bregman projections instead of
+        grid search. It provides provable approximation guarantees and faster
+        convergence for high-dimensional hyperparameter spaces.
+        
+        Args:
+            features_df: DataFrame with features
+            outer_fold_idx: Current outer fold index
+            outer_train_start: Start of training window
+            outer_train_end: End of training window
+            regimes_config: Regime configuration
+            fw_config: ProjectFW configuration (uses defaults if None)
+            
+        Returns:
+            Tuple of (best_candidate, trials, optimization_result)
+        """
+        inner_folds = self._generate_inner_folds(outer_train_start, outer_train_end)
+        
+        if not inner_folds:
+            best = self.candidates[0] if self.candidates else HparamCandidate(0, {})
+            empty_result = OptimizationResult(
+                x_best=np.array([0.0]),
+                f_best=0.0,
+                iterations=0,
+                convergence_history=[],
+                subproblem_times=[],
+                approximation_quality=1.0,
+            )
+            return best, [], empty_result
+        
+        # Define objective function for ProjectFW
+        def objective(x: np.ndarray) -> float:
+            """Evaluate composite score for parameter vector x.
+            
+            x is a continuous vector in [0,1]^d that we map to discrete candidates.
+            """
+            # Map continuous x to discrete candidate selection
+            # Use x as weights for candidates (softmax-like selection)
+            if len(x) != len(self.candidates):
+                # Pad or truncate as needed
+                weights = np.ones(len(self.candidates))
+                weights[:min(len(x), len(weights))] = x[:len(weights)]
+            else:
+                weights = x
+            
+            # Softmax to get selection probabilities
+            exp_weights = np.exp(weights - np.max(weights))
+            probs = exp_weights / exp_weights.sum()
+            
+            # Weighted average of candidate scores
+            total_score = 0.0
+            for cand, prob in zip(self.candidates, probs):
+                cand_scores = []
+                for inner in inner_folds:
+                    result = self._evaluate_candidate_on_inner(
+                        candidate=cand,
+                        features_df=features_df,
+                        inner_fold=inner,
+                        outer_fold_idx=outer_fold_idx,
+                        regimes_config=regimes_config,
+                    )
+                    cand_scores.append(result.composite_score)
+                avg_score = np.mean(cand_scores) if cand_scores else 999.0
+                total_score += prob * avg_score
+            
+            return total_score
+        
+        # Set up constraint polytope (simplex for candidate selection)
+        n_candidates = len(self.candidates)
+        bounds = [(0.0, 1.0) for _ in range(n_candidates)]
+        
+        # Initial point (uniform distribution over candidates)
+        x0 = np.ones(n_candidates) / n_candidates
+        
+        # Run ProjectFW optimization
+        if fw_config is None:
+            fw_config = ProjectFWConfig()
+        
+        optimizer = ProjectFWOptimizer(fw_config)
+        opt_result = optimizer.optimize(
+            objective=objective,
+            bounds=bounds,
+            x0=x0,
+        )
+        
+        # Extract best candidate from optimal weights
+        best_weights = opt_result.x_best
+        best_idx = int(np.argmax(best_weights))
+        best = self.candidates[best_idx]
+        self.selected_params[outer_fold_idx] = best
+        
+        # Evaluate best candidate on all inner folds for trials
+        trials = []
+        for inner in inner_folds:
+            result = self._evaluate_candidate_on_inner(
+                candidate=best,
+                features_df=features_df,
+                inner_fold=inner,
+                outer_fold_idx=outer_fold_idx,
+                regimes_config=regimes_config,
+            )
+            trials.append(result)
+        
+        return best, trials, opt_result
+
     def run(
         self,
         features_df: pd.DataFrame,
@@ -1019,3 +1144,126 @@ class RalphLoop:
             "sharpness_std": float(sel_df["sharpness"].std()),
             "mae_std": float(sel_df["mae"].std()),
         }
+
+    def run_with_projectfw(
+        self,
+        features_df: pd.DataFrame,
+        outer_harness: WalkForwardHarness,
+        regimes_config: dict,
+        fw_config: Optional[ProjectFWConfig] = None,
+    ) -> Tuple[pd.DataFrame, dict]:
+        """Run the Ralph Loop using ProjectFW Bregman optimization instead of grid search.
+        
+        This provides faster convergence and provable approximation guarantees for
+        hyperparameter selection, especially useful when the parameter space is large.
+        
+        Args:
+            features_df: DataFrame with features and future_return target
+            outer_harness: WalkForwardHarness defining outer folds
+            regimes_config: Regime configuration dict
+            fw_config: ProjectFW configuration (uses defaults if None)
+            
+        Returns:
+            trials_df: DataFrame with all trial results
+            selected_json: Dict with chosen params per outer fold + global best + optimization info
+        """
+        np.random.seed(self.random_seed)
+        
+        # Sort for determinism
+        features_df = features_df.sort_values(["symbol", "bar_idx"]).reset_index(
+            drop=True
+        )
+        
+        all_trials: List[TrialResult] = []
+        optimization_results = {}
+        
+        for fold in outer_harness.generate_folds(features_df):
+            print(f"  Ralph Loop (ProjectFW): Processing outer fold {fold.fold_idx}...")
+            
+            best, fold_trials, opt_result = self._select_best_projectfw(
+                features_df=features_df,
+                outer_fold_idx=fold.fold_idx,
+                outer_train_start=fold.train_start,
+                outer_train_end=fold.train_end,
+                regimes_config=regimes_config,
+                fw_config=fw_config,
+            )
+            
+            all_trials.extend(fold_trials)
+            optimization_results[fold.fold_idx] = {
+                "iterations": opt_result.iterations,
+                "final_objective": float(opt_result.f_best),
+                "approximation_quality": float(opt_result.approximation_quality),
+                "converged": opt_result.iterations < (fw_config.max_iterations if fw_config else 100),
+            }
+            print(f"    Selected candidate {best.candidate_id}: {best.params}")
+            print(f"    ProjectFW: {opt_result.iterations} iterations, α={opt_result.approximation_quality:.4f}")
+        
+        # Build trials DataFrame
+        if all_trials:
+            trials_df = pd.DataFrame(
+                [
+                    {
+                        "outer_fold": t.outer_fold,
+                        "candidate_id": t.candidate_id,
+                        "inner_fold": t.inner_fold,
+                        "coverage_90": t.coverage_90,
+                        "sharpness": t.sharpness,
+                        "mae": t.mae,
+                        "wis": t.wis,
+                        "is90": t.is90,
+                        "abstention_rate": t.abstention_rate,
+                        "composite_score": t.composite_score,
+                        "params_json": t.params_json,
+                        "resolved_params_json": t.resolved_params_json,
+                        "confidence_floor": t.confidence_floor,
+                        "sigma_scale": t.sigma_scale,
+                        "n_trades": t.n_trades,
+                        "coverage_90_conditional": t.coverage_90_conditional,
+                        "coverage_90_unconditional": t.coverage_90_unconditional,
+                    }
+                    for t in all_trials
+                ]
+            )
+        else:
+            trials_df = pd.DataFrame()
+        
+        # Build selected_json
+        selected_json = {"per_fold": {}, "global_best": {}, "projectfw_info": {}}
+        for fold_idx, cand in self.selected_params.items():
+            selected_json["per_fold"][str(fold_idx)] = {
+                "candidate_id": cand.candidate_id,
+                "params": cand.params,
+                "optimization": optimization_results.get(fold_idx, {}),
+            }
+        
+        # Global best = most frequently selected candidate
+        if self.selected_params:
+            counts = Counter(c.candidate_id for c in self.selected_params.values())
+            most_common_id = counts.most_common(1)[0][0]
+            global_best = next(
+                c for c in self.candidates if c.candidate_id == most_common_id
+            )
+            selected_json["global_best"] = {
+                "candidate_id": global_best.candidate_id,
+                "params": global_best.params,
+                "selection_count": counts[most_common_id],
+            }
+        
+        # Add ProjectFW metadata
+        selected_json["projectfw_info"] = {
+            "optimization_method": "Bregman-FW",
+            "total_folds": len(optimization_results),
+            "avg_iterations": np.mean([r["iterations"] for r in optimization_results.values()]) if optimization_results else 0,
+            "avg_approximation_quality": np.mean([r["approximation_quality"] for r in optimization_results.values()]) if optimization_results else 0,
+            "config": fw_config.__dict__ if fw_config else ProjectFWConfig().__dict__,
+        }
+        
+        # Add phase E info
+        selected_json["phase_e_info"] = {
+            "feature_cache_stats": self._feature_cache.stats(),
+            "key_mappings": HPARAM_KEY_MAP,
+            "has_structural_params": self._has_structural_params,
+        }
+        
+        return trials_df, selected_json

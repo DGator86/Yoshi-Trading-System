@@ -119,7 +119,7 @@ class BacktestRunner:
 
         Execution model:
         - Decision at bar t: observe close[t], generate signal
-        - Fill at bar t+1: execute at close[t+1]
+        - Fill at bar t+1: execute at close[t+1] (next available bar in data)
 
         Args:
             symbol_df: DataFrame filtered to one symbol, sorted by time
@@ -127,6 +127,7 @@ class BacktestRunner:
         """
         symbol = symbol_df["symbol"].iloc[0]
         pending_order: Optional[PendingOrder] = None
+        prev_row_idx: int = -1  # Track DataFrame row index for next-bar validation
 
         for idx in range(len(symbol_df)):
             row = symbol_df.iloc[idx]
@@ -140,6 +141,30 @@ class BacktestRunner:
             # STEP 1: Execute any pending order from previous bar
             if pending_order is not None:
                 # Fill at CURRENT bar's close (this was decided on PREVIOUS bar)
+                # Verify no same-bar fill and this is the next available bar in data
+                # Note: bar_idx may have gaps due to walk-forward validation folds,
+                # but we must fill on the next available bar (idx == prev_row_idx + 1)
+                if current_bar_idx <= pending_order.decision_bar_idx:
+                    raise AssertionError(
+                        f"Fill must be after decision bar (no same-bar fill): "
+                        f"decision_bar={pending_order.decision_bar_idx}, fill_bar={current_bar_idx}"
+                    )
+                if idx != prev_row_idx + 1:
+                    # Cancel pending order if we skipped rows (shouldn't happen)
+                    pending_order = None
+                else:
+                    fill = self.executor.execute(
+                        timestamp=current_time,
+                        symbol=symbol,
+                        bar_idx=current_bar_idx,
+                        side=pending_order.side,
+                        quantity=pending_order.quantity,
+                        mid_price=current_price,
+                        volatility=pending_order.volatility,
+                        decision_bar_idx=pending_order.decision_bar_idx,
+                    )
+                    portfolio.apply_fill(fill)
+                    pending_order = None
                 # Verify we're filling at bar_idx > decision_bar_idx (no same-bar fill)
                 if current_bar_idx <= pending_order.decision_bar_idx:
                     # Same-bar or earlier fill would be lookahead - skip this order
@@ -177,11 +202,18 @@ class BacktestRunner:
             if idx >= len(symbol_df) - 1:
                 continue
 
-            signal = self.signal_gen.generate_single(row)
+            signal = self.signal_gen.generate_single(
+                row, symbol=symbol, bar_idx=current_bar_idx
+            )
 
             # Compute current equity and available cash for position sizing
             current_equity = portfolio.get_equity({symbol: current_price})
             available_cash = portfolio.cash
+
+            # Get confidence for position sizing
+            confidence = row.get("S_pmax", None)
+            if pd.isna(confidence):
+                confidence = None
 
             # Compute target position based on signal
             target_qty = self.position_mgr.compute_target_position(
@@ -189,6 +221,8 @@ class BacktestRunner:
                 equity=current_equity,
                 price=current_price,
                 available_cash=available_cash,
+                volatility=volatility,
+                confidence=confidence,
             )
 
             # Current position for this symbol
@@ -226,6 +260,9 @@ class BacktestRunner:
                     quantity=qty,
                     volatility=volatility,
                 )
+
+            # Track row index for next-bar validation
+            prev_row_idx = idx
 
     def save_results(self, result: BacktestResult, out_dir: Path) -> None:
         """Save backtest results to output directory.

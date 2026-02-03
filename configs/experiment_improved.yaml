@@ -1,18 +1,14 @@
+# Improved experiment configuration with enhanced ML models
 symbols:
 - BTCUSDT
 - ETHUSDT
 - SOLUSDT
 venue: binance_spot
 dataset:
-  mode: parquet  # Use extended realistic data
+  mode: parquet
   parquet_dir: data/ccxt_extended
-  # Live data settings (used when mode: live)
-  live:
-    exchange: binance
-    days: 30  # Days of historical data to fetch
-    # api_key: ${CCXT_API_KEY}  # Optional: set via environment variable
-    # secret: ${CCXT_SECRET}    # Optional: set via environment variable
 random_seed: 1337
+
 walkforward:
   outer_folds: 4
   train_days: 30
@@ -20,6 +16,7 @@ walkforward:
   test_days: 7
   purge_trades: HORIZON
   embargo_trades: HORIZON
+
 forecast:
   target: price_at_time
   baseline_required: true
@@ -33,7 +30,7 @@ forecast:
     - sharpness
     - mae
   horizon_bars: 9
-  sigma_scale: 1.0
+  sigma_scale: 2.8  # Optimized from Ralph Loop
   residual_calibration:
     enabled: true
     alpha: 0.1
@@ -43,8 +40,19 @@ forecast:
     ewma_lambda: 0.35
     clip_lo: 0.0
     clip_hi: 0.08
+
 artifacts:
-  out_dir: reports/latest
+  out_dir: reports/improved
+
 models:
   predictor:
-    sigma_scale: 2.86
+    # Use gradient boosting backend for nonlinear patterns
+    backend: gradient_boost
+    n_estimators: 50
+    max_depth: 3
+    learning_rate: 0.1
+    l2_reg: 0.01
+    # Enable extended feature set
+    extended_features: true
+    normalize: true
+    sigma_scale: 2.8
