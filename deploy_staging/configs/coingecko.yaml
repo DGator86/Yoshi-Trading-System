@@ -1,0 +1,25 @@
+# CoinGecko Data Source Configuration
+# This file demonstrates how to configure the CoinGecko API integration
+
+data_source:
+  # Choose between 'stub' or 'coingecko'
+  type: stub  # Default: use synthetic data
+  
+  # Settings for CoinGecko API
+  coingecko:
+    # API key should be set via environment variable COINGECKO_API_KEY
+    # Never commit your actual API key to version control
+    api_key_env: COINGECKO_API_KEY
+    
+    # Number of days of historical data to fetch
+    days: 30
+    
+    # Number of synthetic trades to generate per price point
+    # (CoinGecko provides aggregate data, so we generate synthetic trades)
+    trades_per_interval: 10
+    
+  # Supported trading symbols
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT

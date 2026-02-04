@@ -4,20 +4,14 @@ symbols:
 - SOLUSDT
 venue: binance_spot
 dataset:
-  mode: parquet  # Use cached data (avoid geo-restricted exchanges)
-  parquet_dir: data/large_history
-  # Live data settings (used when mode: live or ohlcv)
-  live:
-    exchange: kraken  # Use Kraken (no geo-restrictions) instead of binance
-    days: 365  # Days of historical data to fetch
-    # api_key: ${CCXT_API_KEY}  # Optional: set via environment variable
-    # secret: ${CCXT_SECRET}    # Optional: set via environment variable
+  mode: parquet
+  parquet_dir: data/parquet
 random_seed: 1337
 walkforward:
-  outer_folds: 4
-  train_days: 30
-  val_days: 7
-  test_days: 7
+  outer_folds: 8
+  train_days: 180
+  val_days: 30
+  test_days: 30
   purge_trades: HORIZON
   embargo_trades: HORIZON
 forecast:
@@ -48,3 +42,31 @@ artifacts:
 models:
   predictor:
     sigma_scale: 2.86
+ralph_loop:
+  enabled: true
+  target_coverage: 0.9
+  inner_folds: 3
+  purge_bars: 10
+  embargo_bars: 10
+  weights:
+    coverage: 4.0
+    wis: 1.0
+    is90: 0.5
+    mae: 1.0
+    abstention: 0.5
+  grid:
+    domains.domains.D0.n_trades:
+    - 100
+    - 200
+    regimes.confidence_floor:
+    - 0.5
+    - 0.6
+    forecast.sigma_scale:
+    - 1.0
+    - 1.15
+    - 1.3
+    - 1.5
+    - 1.8
+    - 2.2
+    - 2.8
+    - 3.5
