@@ -50,3 +50,44 @@ PASS requires:
 - 90% interval coverage in [0.87, 0.93] across OOS folds
 - improved sharpness vs baseline at similar coverage
 - deterministic outputs given seed/config
+
+## Moltbot AI + Service Setup
+To connect an AI planner and your external services (Slack, webhooks, etc.), use
+the Moltbot orchestration layer.
+
+### 1) Configure Moltbot
+Edit `configs/moltbot.yaml` with:
+- Your AI provider settings (OpenAI-compatible endpoint + model)
+- Your API key environment variable name
+- Your risk constraints
+- Any webhook services you want notified
+
+Example config is already provided in `configs/moltbot.yaml`.
+
+### 2) Set your API key
+```bash
+export OPENAI_API_KEY=your-api-key
+```
+
+### 3) Call Moltbot in your pipeline
+```python
+from gnosis.execution import MoltbotOrchestrator, load_moltbot_config
+
+config = load_moltbot_config("configs/moltbot.yaml")
+orchestrator = MoltbotOrchestrator(config)
+
+forecast = {
+    "symbol": "BTCUSDT",
+    "direction": "up",
+    "confidence": 0.72,
+    "q05": 64200,
+    "q50": 66800,
+    "q95": 70100,
+}
+
+trade_plan = orchestrator.propose_trade(forecast)
+orchestrator.notify(trade_plan)
+```
+
+This keeps Yoshi focused on forecasting while Moltbot handles AI reasoning and
+service integration.
