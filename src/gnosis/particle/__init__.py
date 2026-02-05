@@ -84,6 +84,28 @@ from .collector import (
     MarketState,
     get_collector_hyperparameters,
 )
+from .crypto_potential import (
+    CryptoParticlePotential,
+    CryptoParticleConfig,
+    AVWAPAnchorSet,
+    AVWAPConfig,
+    AnchorType,
+    BollingerDiffusion,
+    BollingerConfig,
+    MAWellField,
+    MAWellConfig,
+    OIHazardModel,
+    OIHazardConfig,
+    RSIThrottle,
+    RSIThrottleConfig,
+    IchimokuRegimeGate,
+    IchimokuConfig,
+    ManifoldRegime,
+    CVDTracker,
+    CVDConfig,
+    get_crypto_potential_feature_names,
+    get_crypto_potential_hyperparameters,
+)
 
 __all__ = [
     # Core
@@ -137,6 +159,27 @@ __all__ = [
     "CollectorConfig",
     "MarketState",
     "get_collector_hyperparameters",
+    # Crypto Particle Potential
+    "CryptoParticlePotential",
+    "CryptoParticleConfig",
+    "AVWAPAnchorSet",
+    "AVWAPConfig",
+    "AnchorType",
+    "BollingerDiffusion",
+    "BollingerConfig",
+    "MAWellField",
+    "MAWellConfig",
+    "OIHazardModel",
+    "OIHazardConfig",
+    "RSIThrottle",
+    "RSIThrottleConfig",
+    "IchimokuRegimeGate",
+    "IchimokuConfig",
+    "ManifoldRegime",
+    "CVDTracker",
+    "CVDConfig",
+    "get_crypto_potential_feature_names",
+    "get_crypto_potential_hyperparameters",
 ]
 
 
@@ -153,5 +196,6 @@ def get_all_particle_hyperparameters():
         get_temporal_hyperparameters() +
         get_orderbook_hyperparameters() +
         get_calibration_hyperparameters() +
-        get_collector_hyperparameters()
+        get_collector_hyperparameters() +
+        get_crypto_potential_hyperparameters()
     )
