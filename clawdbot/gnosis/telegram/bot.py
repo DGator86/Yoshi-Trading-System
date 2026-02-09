@@ -44,26 +44,49 @@ class TelegramAPI:
     def _call(self, method: str, data: dict = None, timeout: int = 30) -> Optional[dict]:
         """Call a Telegram Bot API method."""
         url = f"{self.base_url}/{method}"
-        body = json.dumps(data).encode() if data else None
-        headers = {"Content-Type": "application/json"} if body else {}
-        req = request.Request(url, data=body, headers=headers, method="POST" if body else "GET")
         try:
-            with request.urlopen(req, timeout=timeout) as resp:
-                result = json.loads(resp.read().decode())
-                if result.get("ok"):
-                    return result.get("result")
-                return None
-        except urlerror.HTTPError as e:
-            try:
-                err_body = e.read().decode()
-                err_data = json.loads(err_body)
-                # Silently handle "can't parse entities" by retrying plain
-                if err_data.get("error_code") == 400:
-                    return {"parse_error": True, "description": err_data.get("description", "")}
-            except Exception:
-                pass
+            import requests
+            if data:
+                resp = requests.post(url, json=data, timeout=timeout)
+            else:
+                resp = requests.get(url, timeout=timeout)
+            
+            result = resp.json()
+            if result.get("ok"):
+                return result.get("result")
+            
+            if resp.status_code == 400:
+                return {"parse_error": True, "description": result.get("description", "")}
+            
+            print(f"[TG] API Error {resp.status_code}: {resp.text}")
             return None
-        except Exception:
+            
+        except ImportError:
+            # Fallback to urllib if requests is missing
+            body = json.dumps(data).encode() if data else None
+            headers = {"Content-Type": "application/json"} if body else {}
+            req = request.Request(url, data=body, headers=headers, method="POST" if body else "GET")
+            try:
+                with request.urlopen(req, timeout=timeout) as resp:
+                    result = json.loads(resp.read().decode())
+                    if result.get("ok"):
+                        return result.get("result")
+                    return None
+            except urlerror.HTTPError as e:
+                try:
+                    err_body = e.read().decode()
+                    print(f"[TG] API Error {e.code}: {err_body}")
+                    err_data = json.loads(err_body)
+                    if err_data.get("error_code") == 400:
+                        return {"parse_error": True, "description": err_data.get("description", "")}
+                except Exception:
+                    pass
+                return None
+            except Exception as e:
+                print(f"[TG] Urllib Request Exception: {e}")
+                return None
+        except Exception as e:
+            print(f"[TG] Requests Exception: {e}")
             return None
 
     def get_me(self) -> Optional[dict]:
