@@ -2,9 +2,41 @@ import subprocess
 import json
 
 token = '8501633363:AAHaBepg65Uu-pKjZhFD1zOuiHV_zypGVQY'
-cmd = f"python3 -c \"import requests; res = requests.get('https://api.telegram.org/bot{token}/getUpdates'); print(res.text)\""
-remote_cmd = f"ssh root@165.245.140.115 {cmd}"
+vps_ip = "165.245.140.115"
 
-result = subprocess.run(remote_cmd, shell=True, capture_output=True, text=True)
-print(result.stdout)
-print(result.stderr)
+# Using curl avoids python One-Liner quoting hell in SSH
+# -s for silent (no progress bar), -S to show errors
+curl_cmd = f"curl -s -S https://api.telegram.org/bot{token}/getUpdates"
+
+remote_cmd = f"ssh -o BatchMode=yes -o ConnectTimeout=10 root@{vps_ip} \"{curl_cmd}\""
+
+print(f"Executing: {remote_cmd}")
+try:
+    result = subprocess.run(remote_cmd, shell=True, capture_output=True, text=True)
+    print("STDOUT:", result.stdout)
+    if result.stderr:
+        print("STDERR:", result.stderr)
+
+    # Check if we got valid JSON
+    output = result.stdout.strip()
+    if output.startswith('{'):
+        try:
+             data = json.loads(output)
+             if data.get('ok'):
+                 print("\nSUCCESS: Valid Token.")
+                 updates = data.get('result', [])
+                 if not updates:
+                     print("No updates found. Send a message to the bot to generate a Chat ID.")
+                 else:
+                     for res in updates:
+                         chat = res.get('message', {}).get('chat', {})
+                         print(f"Chat ID found: {chat.get('id')} (Type: {chat.get('type')}, User: {chat.get('username')})")
+             else:
+                 print("\nAPI Error:", data)
+        except json.JSONDecodeError:
+             print("\nFailed to decode JSON response")
+    else:
+        print("Output does not look like JSON.")
+
+except Exception as e:
+    print(f"Error: {e}")
