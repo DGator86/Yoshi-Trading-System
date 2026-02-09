@@ -81,6 +81,12 @@ async def get_status() -> Dict[str, Any]:
     }
 
 
+@app.get("/health")
+async def health_check() -> Dict[str, str]:
+    """Simple health check endpoint for monitoring."""
+    return {"status": "healthy"}
+
+
 @app.get("/positions")
 async def get_positions() -> List[Dict]:
     """Retrieve all currently active positions."""
