@@ -194,11 +194,14 @@ def find_scanner_log() -> str:
     """Find the Yoshi-Bot scanner log on the system."""
     candidates = [
         "scanner.log",
-        "../Yoshi-Bot/scanner.log",
-        "../../Yoshi-Bot/scanner.log",
+        "../../yoshi-bot/scanner.log",
+        "../yoshi-bot/scanner.log",
+        "yoshi-bot/scanner.log",
+        "C:/Users/Darrin Vogeli/OneDrive - Penetron/Desktop/Yoshi-Trading-System/yoshi-bot/scanner.log",
         "C:/Users/Darrin Vogeli/OneDrive - Penetron/Desktop/Yoshi-Bot/scanner.log",
         "/home/root/Yoshi-Bot/logs/scanner.log",
         "/root/Yoshi-Bot/logs/scanner.log",
+        "/root/Yoshi-Trading-System/yoshi-bot/scanner.log",
     ]
     for path in candidates:
         if Path(path).exists():
