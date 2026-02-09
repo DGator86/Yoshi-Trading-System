@@ -1,0 +1,45 @@
+# Master Gitignore for Yoshi-Trading-System Monorepo
+
+# Environment secrets (CRITICAL)
+.env
+.env.local
+.env.*.local
+*.pem
+.kalshi/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+
+# Node (ClawdBot)
+node_modules/
+package-lock.json
+
+# Logs & Runtime Data
+*.log
+logs/
+pids/
+*.pid
+data/
+reports/
+scripts/monte-carlo/results.json
+_moltbot_probe.txt
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary
+tmp/
+temp/
+*.tmp
