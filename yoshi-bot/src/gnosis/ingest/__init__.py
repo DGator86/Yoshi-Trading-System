@@ -18,6 +18,20 @@ except ImportError:
     fetch_live_prints = None
     fetch_live_ohlcv = None
 
+# Continuous source scanner
+try:
+    from .source_scanner import (
+        SourceSpec,
+        CryptoSourceScannerConfig,
+        CryptoSourceScanner,
+    )
+    _HAS_SOURCE_SCANNER = True
+except ImportError:
+    _HAS_SOURCE_SCANNER = False
+    SourceSpec = None
+    CryptoSourceScannerConfig = None
+    CryptoSourceScanner = None
+
 # Multi-source providers
 try:
     from .providers import (
@@ -59,6 +73,9 @@ __all__ = [
     "CCXTLoader",
     "fetch_live_prints",
     "fetch_live_ohlcv",
+    "SourceSpec",
+    "CryptoSourceScannerConfig",
+    "CryptoSourceScanner",
     # Multi-source providers
     "DataProvider",
     "ProviderConfig",

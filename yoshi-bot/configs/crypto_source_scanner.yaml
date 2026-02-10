@@ -1,0 +1,51 @@
+# Continuous crypto source scanner configuration.
+#
+# Symbols are canonical strategy symbols. Each source can override the exact
+# ccxt market symbol via ccxt_symbol_overrides.
+scanner:
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+
+  poll_interval_sec: 5
+  fail_sleep_sec: 2
+  output_dir: data/live/crypto_sources
+
+  enable_orderbook: true
+  orderbook_limit: 50
+  orderbook_depth_levels: 10
+  enable_funding: true
+  enable_open_interest: true
+
+  # Sources are polled every cycle.
+  sources:
+    - exchange: binance
+      tag: binance_spot
+      symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+      ccxt_symbol_overrides:
+        BTCUSDT: BTC/USDT
+        ETHUSDT: ETH/USDT
+        SOLUSDT: SOL/USDT
+      enabled: true
+      rate_limit_ms: 250
+
+    - exchange: okx
+      tag: okx_spot
+      symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+      ccxt_symbol_overrides:
+        BTCUSDT: BTC/USDT
+        ETHUSDT: ETH/USDT
+        SOLUSDT: SOL/USDT
+      enabled: true
+      rate_limit_ms: 350
+
+    - exchange: bybit
+      tag: bybit_spot
+      symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+      ccxt_symbol_overrides:
+        BTCUSDT: BTC/USDT
+        ETHUSDT: ETH/USDT
+        SOLUSDT: SOL/USDT
+      enabled: true
+      rate_limit_ms: 350

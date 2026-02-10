@@ -34,6 +34,39 @@ python scripts/fetch_coingecko_data.py --symbols BTCUSDT ETHUSDT --days 30
 
 Supported symbols: BTCUSDT, ETHUSDT, SOLUSDT
 
+## Continuous Crypto Source Scanner
+
+The repository now includes a persistent source scanner that continuously polls
+multiple exchanges and writes normalized snapshots for downstream models.
+
+### Run once (smoke check)
+```bash
+python3 yoshi-bot/scripts/run_crypto_source_scanner.py --once \
+  --config yoshi-bot/configs/crypto_source_scanner.yaml
+```
+
+### Run continuously
+```bash
+python3 yoshi-bot/scripts/run_crypto_source_scanner.py \
+  --config yoshi-bot/configs/crypto_source_scanner.yaml
+```
+
+Outputs are written to `data/live/crypto_sources/`:
+- `latest.json` (full latest cycle)
+- `consensus_latest.json` (cross-source consensus)
+- `snapshots_YYYYMMDD.ndjson` (append-only history)
+
+### systemd service
+
+Service unit: `services/crypto-source-scanner.service`
+
+```bash
+sudo cp services/crypto-source-scanner.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now crypto-source-scanner
+sudo systemctl status crypto-source-scanner
+```
+
 ## Crypto Price-as-a-Particle (Strengthened Approach)
 
 For the crypto-first, physics-consistent interpretation of VWAP, EMA, Bollinger Bands,
