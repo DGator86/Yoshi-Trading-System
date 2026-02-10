@@ -168,3 +168,47 @@ class KalshiClient:
         except requests.exceptions.RequestException as e:
             print(f"Kalshi Series List Error: {e}")
             return []
+
+    def place_order(self, ticker: str, action: str, side: str, count: int,
+                    order_type: str = "market",
+                    client_order_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Place an order on Kalshi."""
+        path = "/portfolio/orders"
+        
+        # Validate inputs
+        action = action.lower()
+        side = side.lower()
+        if action not in ["buy", "sell"]:
+            raise ValueError("Action must be 'buy' or 'sell'")
+        if side not in ["yes", "no"]:
+            raise ValueError("Side must be 'yes' or 'no'")
+            
+        payload = {
+            "ticker": ticker,
+            "action": action,
+            "side": side,
+            "count": count,
+            "type": order_type,
+            "client_order_id": client_order_id or str(int(time.time() * 1000))
+        }
+        
+        # Convert to JSON string for signing
+        import json
+        body = json.dumps(payload)
+        headers = self._get_headers("POST", path, body)
+        
+        try:
+            response = requests.post(
+                self.BASE_URL + path,
+                data=body,
+                headers=headers,
+                timeout=10
+            )
+            if response.status_code == 201:
+                return response.json().get("order")
+            print(f"Kalshi Order Error: {response.status_code} - {response.text}")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"Kalshi Order Exception: {e}")
+            return None
+

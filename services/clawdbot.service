@@ -1,0 +1,16 @@
+[Unit]
+Description=ClawdBot (Telegram Interface)
+After=trading-core.service
+
+[Service]
+User=root
+WorkingDirectory=/root/Yoshi-Trading-System
+ExecStart=/usr/bin/python3 clawdbot/scripts/telegram-bot.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONPATH=/root/Yoshi-Trading-System"
+
+[Install]
+WantedBy=multi-user.target

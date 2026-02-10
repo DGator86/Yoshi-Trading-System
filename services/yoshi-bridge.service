@@ -1,0 +1,16 @@
+[Unit]
+Description=Yoshi Bridge (Scanner -> Trading Core)
+After=kalshi-scanner.service
+
+[Service]
+User=root
+WorkingDirectory=/root/Yoshi-Trading-System
+ExecStart=/usr/bin/python3 clawdbot/scripts/yoshi-bridge.py --poll-interval 10
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONPATH=/root/Yoshi-Trading-System"
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Yoshi Trading Core API
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/Yoshi-Trading-System
+ExecStart=/usr/bin/python3 yoshi-bot/scripts/start_trading_core.py --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONPATH=/root/Yoshi-Trading-System"
+
+[Install]
+WantedBy=multi-user.target

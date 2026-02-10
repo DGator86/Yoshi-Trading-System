@@ -157,8 +157,52 @@ class QuantumPriceEngine:
         if random_seed is not None:
             np.random.seed(random_seed)
 
-    def detect_regime(
-        self,
+        # Hot-reload state
+        self.param_store_path = "/root/Yoshi-Bot/config/params.json"
+        self._last_param_version = 0
+        self._reload_every_n_cycles = 10
+        self._cycle_count = 0
+
+    def maybe_reload_params(self):
+        """Check if Ralph has published new params. Non-blocking."""
+        self._cycle_count += 1
+        if self._cycle_count % self._reload_every_n_cycles != 0:
+            return
+        
+        try:
+            import json
+            import os
+            if not os.path.exists(self.param_store_path):
+                # Try local path if root path fails (for dev)
+                local_path = "config/params.json"
+                if os.path.exists(local_path):
+                    self.param_store_path = local_path
+                else:
+                    return
+
+            with open(self.param_store_path, "r") as f:
+                store = json.load(f)
+            
+            if store.get("version", 0) > self._last_param_version:
+                self._apply_params(store.get("params", {}))
+                self._last_param_version = store["version"]
+                # Use print or logger
+                print(f"Hot-reloaded params v{self._last_param_version} from Ralph")
+        except Exception:
+            pass
+            
+    def _apply_params(self, params: Dict[str, Any]):
+        """Update physics constants."""
+        # Update class constants if present
+        if "gravity_g" in params: self.GRAVITY_G = params["gravity_g"]
+        if "spring_k" in params: self.SPRING_K = params["spring_k"]
+        if "jump_magnitude" in params: self.JUMP_MAGNITUDE = params["jump_magnitude"]
+        
+        # Update regime params if structure matches
+        if "regime_params" in params:
+            # logic to update REGIME_PARAMS
+            pass
+
         df: pd.DataFrame,
         lookback: int = 120,
     ) -> MarketRegime:

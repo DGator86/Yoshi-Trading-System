@@ -1,0 +1,16 @@
+[Unit]
+Description=Yoshi Kalshi Scanner
+After=trading-core.service
+
+[Service]
+User=root
+WorkingDirectory=/root/Yoshi-Trading-System
+ExecStart=/usr/bin/python3 yoshi-bot/scripts/kalshi_scanner.py --symbol BTCUSDT --loop --bridge --live
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONPATH=/root/Yoshi-Trading-System"
+
+[Install]
+WantedBy=multi-user.target

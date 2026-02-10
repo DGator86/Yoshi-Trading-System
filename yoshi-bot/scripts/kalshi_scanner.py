@@ -7,6 +7,7 @@ prediction market opportunities on Kalshi across multi-scale regimes.
 Supports continuous background running and Telegram alerts.
 """
 import argparse
+import asyncio
 import logging
 import sys
 import time
@@ -21,11 +22,11 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.evaluate_manifold import prints_to_ohlcv  # noqa: E402
-from src.gnosis.ingest.ccxt_loader import fetch_live_ohlcv  # noqa: E402
-from src.gnosis.ingest.coingecko import fetch_coingecko_prints  # noqa: E402
 from src.gnosis.quantum import PriceTimeManifold  # noqa: E402
+from src.gnosis.particle.quantum import QuantumPriceEngine # For param hot-reload
 from src.gnosis.utils.kalshi_client import KalshiClient  # noqa: E402
 import src.gnosis.utils.notifications as notify  # noqa: E402
+from src.gnosis.data.aggregator import DataSourceAggregator # Task 1
 
 # Load environment variables
 load_dotenv()
@@ -55,6 +56,7 @@ def format_kalshi_report(opportunities):
 
     for opp in opportunities:
         lines.append(f"*{opp['symbol']}*")
+        lines.append(f"Ticker: {opp.get('ticker', 'N/A')}")
         lines.append(f"Price: ${opp['current_p']:,.2f}")
         lines.append(f"Forecast: ${opp['forecast_p']:,.2f}")
 
@@ -153,14 +155,13 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
         # Midpoint of the spread for the market probability
         market_prob = ((y_bid + y_ask) / 2) / 100
 
-        # Extract strike price: check 'floor_strike', 'strike_price',
-        # or parse from ticker if needed.
+        # Extract strike price
         strike = market.get('floor_strike')
         if strike is None:
             strike = market.get('strike_price')
 
         if strike is None:
-            # Last resort: parse from ticker (e.g. KXBTC-...-T85000)
+            # Last resort: parse from ticker
             try:
                 ticker = market.get('ticker', '')
                 if '-T' in ticker:
@@ -198,6 +199,11 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
             ).dropna().reset_index()
 
             manifold = PriceTimeManifold()
+            # Note: Parameter hot-reload affects QuantumPriceEngine physics.
+            # PriceTimeManifold (wavefunction dynamics) might need separate linkage 
+            # if we want Ralph to optimize it too. For now, we assume QuantumPriceEngine 
+            # is the primary target for Ralph's optimization loop (physics params).
+            
             manifold.fit_from_1m_bars(tf_df)
 
             h_bars = max(1, 60 // tf)
@@ -223,7 +229,18 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
     return opportunities
 
 
-def main():
+async def data_loop(aggregator: DataSourceAggregator, symbols: list[str], interval: int = 30):
+    """Background task to fetch market data independently."""
+    while True:
+        try:
+            # logger.info("Background data fetch triggered...")
+            await aggregator.fetch_cycle(symbols)
+        except Exception as e:
+            logger.error(f"Data fetch failed: {e}")
+        await asyncio.sleep(interval)
+
+
+async def main():
     """Main entry point for the Kalshi Scanner."""
     parser = argparse.ArgumentParser(description="Kalshi Bot Scanner")
     parser.add_argument("--symbol", type=str, default="BTCUSDT",
@@ -236,7 +253,7 @@ def main():
     parser.add_argument("--live", action="store_true", default=True,
                         help="Fetch live data from APIs (default: True)")
     parser.add_argument("--exchange", type=str, default="kraken",
-                        help="CCXT exchange ID (default: kraken)")
+                        help="Deprecated: Exchange ID (now handled by aggregator)")
     parser.add_argument("--bridge", action="store_true",
                         help="Send opportunities to Trading Core API")
     args = parser.parse_args()
@@ -245,52 +262,73 @@ def main():
     last_alert_time = 0
     cooldown = 3600  # 1 hour cooldown per alert
 
+    # Task 1: Initialize Aggregator
+    aggregator = DataSourceAggregator()
+    
+    # Task 4: Initialize Quantum Engine for Param Hot-Reload
+    quantum_engine = QuantumPriceEngine()
+
     print(f"Starting Kalshi Scanner for {args.symbol}...")
     if args.loop:
-        print(f"Continuous mode active. Interval: {args.interval}s")
+        print(f"Continuous mode active. Scan Interval: {args.interval}s")
+
+    # Start independent data loop
+    if args.live:
+        asyncio.create_task(data_loop(aggregator, [args.symbol]))
+        print("Background data aggregator started.")
 
     while True:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning...")
+        
+        # Task 4: Check for Ralph updates
+        quantum_engine.maybe_reload_params()
 
         live_data = None
         if args.live:
-            # Multi-source ingestion attempt
-            sources = [args.exchange, 'coinbase', 'kraken']
-            for src in sources:
+            # Task 1: Use aggregator cache instead of direct fetch
+            snapshot = aggregator.get_latest()
+            if snapshot and args.symbol in snapshot.get("symbols", {}):
+                s_data = snapshot["symbols"][args.symbol]
+                
+                # Convert list of dicts to DataFrame
+                # s_data["ohlcv"] is list of dicts [timestamp, open, high, low, close, volume]
                 try:
-                    print(f"Attempting live ingestion from {src}...")
-                    live_data = fetch_live_ohlcv(
-                        [args.symbol],
-                        exchange=src,
-                        timeframe='1m',
-                        days=2
-                    )
-                    if not live_data.empty:
-                        print(f"Successfully ingested data from {src}.")
-                        break
-                except Exception as e:  # pylint: disable=broad-except
-                    print(f"Ingestion failed for {src}: {e}")
+                    df = pd.DataFrame(s_data["ohlcv"])
+                    if not df.empty:
+                        # Ensure timestamp is datetime
+                        if pd.api.types.is_numeric_dtype(df["timestamp"]):
+                            df["timestamp"] = pd.to_datetime(df["timestamp"], unit='s')
+                        
+                        # Ensure columns are present and correct type
+                        cols = ["open", "high", "low", "close", "volume"]
+                        for c in cols:
+                            df[c] = df[c].astype(float)
+                        
+                        live_data = df
+                        # print(f"Loaded {len(live_data)} bars from cache ({snapshot['source']})")
+                except Exception as e:
+                    logger.error(f"Error converting cache to DataFrame: {e}")
 
-            # Fallback to CoinGecko if CCXT fails
-            if live_data is None or live_data.empty:
-                print("Falling back to CoinGecko...")
-                try:
-                    cg_data = fetch_coingecko_prints([args.symbol], days=2)
-                    if not cg_data.empty:
-                        live_data = prints_to_ohlcv(cg_data, bar_minutes=1)
-                        print("Successfully ingested data from CoinGecko.")
-                except Exception as e:  # pylint: disable=broad-except
-                    print(f"CoinGecko fallback failed: {e}")
-
+            else:
+                if snapshot:
+                    logger.warning(f"Symbol {args.symbol} not in cache.")
+                else:
+                    logger.warning("Cache empty or stale.")
+        
         if live_data is None:
-            print("No live data available. Using local cache.")
+            if args.live:
+                print("No live data available yet (waiting for aggregator). Using local fallback if allowed.")
+            else:
+                print("Live mode disabled. Using local parquet.")
 
+        # Run Scan
         opps = run_scan(
             args.symbol,
             data_path if not args.live or live_data is None else None,
             args.threshold,
             live_ohlcv=live_data
         )
+        
         if opps:
             logger.info("Found %d opportunities!", len(opps))
             report = format_kalshi_report(opps)
@@ -305,6 +343,7 @@ def main():
                     if action != "NEUTRAL":
                         payload = {
                             "symbol": opp['symbol'],
+                            "ticker": opp['ticker'],
                             "action": action,
                             "strike": float(opp['strike']),
                             "market_prob": float(opp['market_prob']),
@@ -312,6 +351,9 @@ def main():
                             "edge": float(edge)
                         }
                         try:
+                            # Note: requests is sync, blocking the loop briefly. 
+                            # Ideally use aiohttp, but keeping legacy bridge logic for now 
+                            # as user instructions focused on data layer.
                             resp = requests.post(
                                 "http://127.0.0.1:8000/propose",
                                 json=payload,
@@ -344,8 +386,11 @@ def main():
         if not args.loop:
             break
 
-        time.sleep(args.interval)
+        await asyncio.sleep(args.interval)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

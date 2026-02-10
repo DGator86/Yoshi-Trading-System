@@ -1,0 +1,11 @@
+[Unit]
+Description=Ralph Meta-Learner Optimization Loop
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/Yoshi-Trading-System
+ExecStart=/usr/bin/python3 yoshi-bot/scripts/run_improvement_loop.py
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONPATH=/root/Yoshi-Trading-System"
