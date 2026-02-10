@@ -77,10 +77,13 @@ python3 yoshi-bot/scripts/run_continuous_learning.py \
   --config yoshi-bot/configs/continuous_learning.yaml
 ```
 
-It monitors timeframe close events and triggers a full cycle when each domain
-accumulates `n=2000` new bars:
+It monitors timeframe close events and triggers a full cycle on the configured
+relative quantized cadence (`run_every_bars`, default `1`, i.e. every close).
+
+`n=2000` is used as the rolling backtest timeline window (`fetch_n`), not as
+the trigger threshold:
 - run experiment (with Ralph Loop hyperparameter selection if `hparams.yaml` is set)
-- run backtest on generated predictions
+- run backtest on the last `fetch_n` timeline units (per symbol)
 - optional extra improvement-loop run
 
 ### One-shot scheduler tick
@@ -103,19 +106,20 @@ sudo systemctl status continuous-learning
 State is persisted at:
 - `reports/continuous/supervisor_state.json`
 
-#### Practical cadence with `n=2000`
+#### Practical settings
 
-If you keep `trigger_n=2000`, the nominal trigger cadence per domain is:
-- `1m`: ~33h
-- `5m`: ~6.9d
-- `15m`: ~20.8d
-- `30m`: ~41.7d
-- `1h`: ~83.3d
-- `4h`: ~333d
-- `1d`: ~2000d
-
-So for faster adaptation, lower `trigger_n` on higher timeframes (for example
-`1h: 240`, `4h: 90`, `1d: 30`) while keeping `1m/5m` closer to 2000.
+- Trigger cadence:
+  - `run_every_bars=1` means each timeframe runs on each bar close.
+  - Increase to `2/3/...` to reduce compute load.
+- Backtest window:
+  - `fetch_n=2000` gives these approximate history spans:
+    - `1m`: ~33h
+    - `5m`: ~6.9d
+    - `15m`: ~20.8d
+    - `30m`: ~41.7d
+    - `1h`: ~83.3d
+    - `4h`: ~333d
+    - `1d`: ~2000d
 
 ## Crypto Price-as-a-Particle (Strengthened Approach)
 

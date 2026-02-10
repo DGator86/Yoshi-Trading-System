@@ -55,7 +55,7 @@ def _cfg(tmp_path: Path, domains, bootstrap_run=False):
 
 def test_trigger_after_n_bars(tmp_path: Path):
     runner = _FakeRunner()
-    config = _cfg(tmp_path, domains=[DomainSpec(timeframe="1m", trigger_n=3, enabled=True)])
+    config = _cfg(tmp_path, domains=[DomainSpec(timeframe="1m", fetch_n=2000, run_every_bars=3, enabled=True)])
     supervisor = ContinuousLearningSupervisor(
         config=config,
         candle_fetcher=_FakeFetcher(),
@@ -67,9 +67,9 @@ def test_trigger_after_n_bars(tmp_path: Path):
         supervisor.run_once(now_ts=now)
 
     assert len(runner.calls) == 1
-    assert runner.calls[0]["reason"] == "n_bars_3"
+    assert runner.calls[0]["reason"] == "quantized_1m_bars_3"
     dstate = supervisor.state["domains"]["1m"]
-    assert dstate["bars_since_trigger"] == 0
+    assert dstate["bars_since_run"] == 0
     assert dstate["runs_total"] == 1
 
 
@@ -77,7 +77,7 @@ def test_bootstrap_trigger_runs_immediately(tmp_path: Path):
     runner = _FakeRunner()
     config = _cfg(
         tmp_path,
-        domains=[DomainSpec(timeframe="1m", trigger_n=2000, enabled=True)],
+        domains=[DomainSpec(timeframe="1m", fetch_n=2000, run_every_bars=1, enabled=True)],
         bootstrap_run=True,
     )
     supervisor = ContinuousLearningSupervisor(
@@ -96,7 +96,7 @@ def test_min_wall_interval_blocks_rapid_retrigger(tmp_path: Path):
     runner = _FakeRunner()
     config = _cfg(
         tmp_path,
-        domains=[DomainSpec(timeframe="1m", trigger_n=1, min_wall_interval_sec=120, enabled=True)],
+        domains=[DomainSpec(timeframe="1m", fetch_n=2000, run_every_bars=1, min_wall_interval_sec=120, enabled=True)],
         bootstrap_run=False,
     )
     supervisor = ContinuousLearningSupervisor(
@@ -110,5 +110,18 @@ def test_min_wall_interval_blocks_rapid_retrigger(tmp_path: Path):
     supervisor.run_once(now_ts=pd.Timestamp("2024-01-01T00:03:00Z"))  # trigger 2
 
     assert len(runner.calls) == 2
-    assert runner.calls[0]["reason"].startswith("n_bars_")
-    assert runner.calls[1]["reason"].startswith("n_bars_")
+    assert runner.calls[0]["reason"].startswith("quantized_1m_bars_")
+    assert runner.calls[1]["reason"].startswith("quantized_1m_bars_")
+
+
+def test_domain_spec_back_compat_trigger_n_maps_to_fetch_n():
+    spec = DomainSpec.from_dict(
+        {
+            "timeframe": "1m",
+            "trigger_n": 2000,
+            "run_every_bars": 2,
+            "enabled": True,
+        }
+    )
+    assert spec.fetch_n == 2000
+    assert spec.run_every_bars == 2

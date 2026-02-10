@@ -61,7 +61,12 @@ def main() -> int:
     if args.once:
         now_ts = pd.Timestamp(args.now, tz="UTC") if args.now else None
         out = supervisor.run_once(now_ts=now_ts)
-        logger.info("One-shot tick: due=%s triggered=%s", out["due"], out["triggered"])
+        logger.info(
+            "One-shot tick: nominal_due=%s checked=%s triggered=%s",
+            out.get("due_nominal", []),
+            out.get("checked_timeframes", []),
+            out.get("triggered", []),
+        )
         return 0
 
     supervisor.run_forever()

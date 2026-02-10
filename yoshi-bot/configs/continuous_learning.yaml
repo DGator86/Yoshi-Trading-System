@@ -1,5 +1,6 @@
 # Always-on machine learning + optimization supervisor.
-# Triggers domain jobs after N newly closed bars per timeframe.
+# Runs on each relative quantized timeframe close (run_every_bars),
+# while fetch_n defines the rolling backtest timeline units.
 continuous_learning:
   symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
   exchange: kraken
@@ -24,40 +25,47 @@ continuous_learning:
   ccxt_rate_limit_ms: 300
   ccxt_sandbox: false
 
-  # n=2000 trigger by domain (as requested).
+  # n=2000 is the rolling fetch/backtest window, not the trigger cadence.
   domains:
     - timeframe: 1m
-      trigger_n: 2000
+      fetch_n: 2000
+      run_every_bars: 1
       forecast_horizon_bars: 1
       min_wall_interval_sec: 0
       enabled: true
     - timeframe: 5m
-      trigger_n: 2000
+      fetch_n: 2000
+      run_every_bars: 1
       forecast_horizon_bars: 1
       min_wall_interval_sec: 0
       enabled: true
     - timeframe: 15m
-      trigger_n: 2000
+      fetch_n: 2000
+      run_every_bars: 1
       forecast_horizon_bars: 1
       min_wall_interval_sec: 0
       enabled: true
     - timeframe: 30m
-      trigger_n: 2000
+      fetch_n: 2000
+      run_every_bars: 1
       forecast_horizon_bars: 1
       min_wall_interval_sec: 0
       enabled: true
     - timeframe: 1h
-      trigger_n: 2000
+      fetch_n: 2000
+      run_every_bars: 1
       forecast_horizon_bars: 1
       min_wall_interval_sec: 0
       enabled: true
     - timeframe: 4h
-      trigger_n: 2000
+      fetch_n: 2000
+      run_every_bars: 1
       forecast_horizon_bars: 1
       min_wall_interval_sec: 0
       enabled: true
     - timeframe: 1d
-      trigger_n: 2000
+      fetch_n: 2000
+      run_every_bars: 1
       forecast_horizon_bars: 1
       min_wall_interval_sec: 0
       enabled: true

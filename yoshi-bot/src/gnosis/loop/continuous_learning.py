@@ -1,7 +1,10 @@
 """Always-on ML and optimization supervisor.
 
-This supervisor continuously monitors configured time domains (timeframes) and
-triggers learning/backtest jobs when each domain accumulates N new closed bars.
+Semantics:
+- Domain jobs trigger on relative quantized timescale closes (per timeframe).
+- `fetch_n` defines the rolling timeline units used for historical fetch +
+  backtest windowing (not trigger cadence).
+- Trigger cadence is controlled by `run_every_bars` (default: every close).
 """
 
 from __future__ import annotations
@@ -67,27 +70,39 @@ def _format_duration(seconds: float) -> str:
 
 @dataclass
 class DomainSpec:
-    """Per-timeframe trigger settings."""
+    """Per-timeframe settings.
+
+    fetch_n: rolling timeline units used for data lookback/backtest slices.
+    run_every_bars: run domain cycle every N new closed bars.
+    """
 
     timeframe: str
-    trigger_n: int = 2000
+    fetch_n: int = 2000
+    run_every_bars: int = 1
     forecast_horizon_bars: int = 1
     min_wall_interval_sec: int = 0
     enabled: bool = True
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "DomainSpec":
+        # Backward compatibility: trigger_n used to be overloaded.
+        fetch_n = int(raw.get("fetch_n", raw.get("trigger_n", 2000)))
         return cls(
             timeframe=str(raw.get("timeframe", "1m")),
-            trigger_n=int(raw.get("trigger_n", 2000)),
+            fetch_n=fetch_n,
+            run_every_bars=int(raw.get("run_every_bars", 1)),
             forecast_horizon_bars=int(raw.get("forecast_horizon_bars", 1)),
             min_wall_interval_sec=int(raw.get("min_wall_interval_sec", 0)),
             enabled=bool(raw.get("enabled", True)),
         )
 
-    def recommended_trigger_seconds(self) -> int:
+    def recommended_run_seconds(self) -> int:
         seconds = TF_SECONDS.get(self.timeframe, 60)
-        return int(self.trigger_n * seconds)
+        return int(max(self.run_every_bars, 1) * seconds)
+
+    def recommended_backtest_window_seconds(self) -> int:
+        seconds = TF_SECONDS.get(self.timeframe, 60)
+        return int(max(self.fetch_n, 1) * seconds)
 
 
 @dataclass
@@ -276,17 +291,53 @@ class SubprocessDomainJobRunner:
         live["exchange"] = self.config.exchange
         live["timeframe"] = spec.timeframe
 
-        # Ensure enough lookback for n=trigger bars.
-        tf_days = (TF_SECONDS[spec.timeframe] * spec.trigger_n) / 86400.0
+        # Ensure enough lookback for fetch_n timeline units.
+        tf_days = (TF_SECONDS[spec.timeframe] * spec.fetch_n) / 86400.0
         min_days = max(30, int(math.ceil(tf_days * 1.3)))
         live["days"] = max(int(live.get("days", 0)), min_days)
 
         cfg.setdefault("forecast", {})
         cfg["forecast"]["horizon_bars"] = int(spec.forecast_horizon_bars)
 
+        # Embed supervisor domain metadata for traceability.
+        cfg.setdefault("continuous_learning", {})
+        cfg["continuous_learning"]["timeframe"] = spec.timeframe
+        cfg["continuous_learning"]["fetch_n"] = int(spec.fetch_n)
+        cfg["continuous_learning"]["run_every_bars"] = int(spec.run_every_bars)
+
         cfg.setdefault("artifacts", {})
         cfg["artifacts"]["out_dir"] = str(run_dir)
         return cfg
+
+    @staticmethod
+    def _build_backtest_slice(
+        predictions_path: Path,
+        spec: DomainSpec,
+        out_path: Path,
+    ) -> tuple[Path, int]:
+        """Slice predictions to last fetch_n timeline units per symbol."""
+        if not predictions_path.exists():
+            return predictions_path, 0
+
+        df = pd.read_parquet(predictions_path)
+        if df.empty:
+            return predictions_path, 0
+
+        n = max(int(spec.fetch_n), 1)
+        if "symbol" in df.columns:
+            sort_cols = [c for c in ("symbol", "bar_idx", "timestamp_end") if c in df.columns]
+            if sort_cols:
+                df = df.sort_values(sort_cols)
+            sliced = df.groupby("symbol", group_keys=False).tail(n).reset_index(drop=True)
+        else:
+            sort_cols = [c for c in ("bar_idx", "timestamp_end") if c in df.columns]
+            if sort_cols:
+                df = df.sort_values(sort_cols)
+            sliced = df.tail(n).reset_index(drop=True)
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        sliced.to_parquet(out_path, index=False)
+        return out_path, len(sliced)
 
     def _run_cmd(self, cmd: list[str], log_path: Path) -> tuple[bool, int]:
         with open(log_path, "a", encoding="utf-8") as logf:
@@ -330,6 +381,8 @@ class SubprocessDomainJobRunner:
             "run_reason": run_reason,
             "run_dir": str(run_dir),
             "state_snapshot": state_snapshot,
+            "fetch_n": int(spec.fetch_n),
+            "run_every_bars": int(spec.run_every_bars),
             "steps": [],
         }
 
@@ -345,18 +398,32 @@ class SubprocessDomainJobRunner:
         if self.config.run_backtest and predictions_path.exists():
             backtest_out = run_dir / "backtest"
             backtest_out.mkdir(parents=True, exist_ok=True)
+            backtest_input = backtest_out / "predictions_backtest_window.parquet"
+            backtest_input, n_rows = self._build_backtest_slice(
+                predictions_path=predictions_path,
+                spec=spec,
+                out_path=backtest_input,
+            )
             bt_cmd = [
                 py,
                 backtest_script,
                 "--predictions",
-                str(predictions_path),
+                str(backtest_input),
                 "--config",
                 backtest_cfg_path,
                 "--out",
                 str(backtest_out),
             ]
             ok_bt, rc_bt = self._run_cmd(bt_cmd, log_path=log_path)
-            metadata["steps"].append({"name": "backtest", "return_code": rc_bt, "ok": ok_bt})
+            metadata["steps"].append(
+                {
+                    "name": "backtest",
+                    "return_code": rc_bt,
+                    "ok": ok_bt,
+                    "input_rows": int(n_rows),
+                    "input_path": str(backtest_input),
+                }
+            )
             if not ok_bt:
                 return False, metadata
 
@@ -415,12 +482,15 @@ class ContinuousLearningSupervisor:
 
     def _log_domain_plan(self) -> None:
         for tf, spec in self.domains.items():
-            sec = spec.recommended_trigger_seconds()
+            cadence_s = spec.recommended_run_seconds()
+            backtest_s = spec.recommended_backtest_window_seconds()
             self.logger.info(
-                "Domain %s trigger_n=%d -> nominal cadence %s",
+                "Domain %s run_every_bars=%d -> cadence %s | fetch_n=%d -> backtest window %s",
                 tf,
-                spec.trigger_n,
-                _format_duration(sec),
+                spec.run_every_bars,
+                _format_duration(cadence_s),
+                spec.fetch_n,
+                _format_duration(backtest_s),
             )
 
     def _load_state(self) -> dict[str, Any]:
@@ -435,10 +505,14 @@ class ContinuousLearningSupervisor:
             d = state["domains"].setdefault(tf, {})
             d.setdefault("last_closed_open_ms", None)
             d.setdefault("bars_total_seen", 0)
-            d.setdefault("bars_since_trigger", 0)
-            d.setdefault("last_trigger_epoch_s", 0)
-            d.setdefault("last_trigger_reason", "")
-            d.setdefault("last_trigger_ok", None)
+            d.setdefault("bars_since_run", d.get("bars_since_trigger", 0))
+            d.setdefault("bars_since_trigger", d.get("bars_since_run", 0))
+            d.setdefault("last_run_epoch_s", d.get("last_trigger_epoch_s", 0))
+            d.setdefault("last_run_reason", d.get("last_trigger_reason", ""))
+            d.setdefault("last_run_ok", d.get("last_trigger_ok", None))
+            d.setdefault("last_trigger_epoch_s", d.get("last_run_epoch_s", 0))
+            d.setdefault("last_trigger_reason", d.get("last_run_reason", ""))
+            d.setdefault("last_trigger_ok", d.get("last_run_ok", None))
             d.setdefault("runs_total", 0)
             d.setdefault("bootstrap_done", False)
         return state
@@ -477,19 +551,20 @@ class ContinuousLearningSupervisor:
 
         dstate["last_closed_open_ms"] = int(closed_open_ms)
         dstate["bars_total_seen"] = int(dstate.get("bars_total_seen", 0)) + int(delta)
-        dstate["bars_since_trigger"] = int(dstate.get("bars_since_trigger", 0)) + int(delta)
+        dstate["bars_since_run"] = int(dstate.get("bars_since_run", 0)) + int(delta)
+        dstate["bars_since_trigger"] = int(dstate["bars_since_run"])
 
         reason = ""
         should_trigger = False
         if self.config.bootstrap_run and not bool(dstate.get("bootstrap_done", False)):
             should_trigger = True
             reason = "bootstrap"
-        elif int(dstate["bars_since_trigger"]) >= int(spec.trigger_n):
+        elif int(dstate["bars_since_run"]) >= max(int(spec.run_every_bars), 1):
             min_wait = int(spec.min_wall_interval_sec)
-            last_trig = int(dstate.get("last_trigger_epoch_s", 0))
-            if min_wait <= 0 or now_epoch_s - last_trig >= min_wait:
+            last_run = int(dstate.get("last_run_epoch_s", 0))
+            if min_wait <= 0 or now_epoch_s - last_run >= min_wait:
                 should_trigger = True
-                reason = f"n_bars_{dstate['bars_since_trigger']}"
+                reason = f"quantized_{timeframe}_bars_{dstate['bars_since_run']}"
             else:
                 reason = "cooldown_wait"
         else:
@@ -505,6 +580,10 @@ class ContinuousLearningSupervisor:
             state_snapshot=snapshot,
             now_ts=pd.Timestamp(now_epoch_s, unit="s", tz="UTC"),
         )
+        dstate["last_run_epoch_s"] = int(now_epoch_s)
+        dstate["last_run_reason"] = reason
+        dstate["last_run_ok"] = bool(ok)
+        # Backward-compatible mirror keys.
         dstate["last_trigger_epoch_s"] = int(now_epoch_s)
         dstate["last_trigger_reason"] = reason
         dstate["last_trigger_ok"] = bool(ok)
@@ -512,6 +591,7 @@ class ContinuousLearningSupervisor:
         dstate["bootstrap_done"] = True
         dstate["last_run_meta"] = meta
         if ok:
+            dstate["bars_since_run"] = 0
             dstate["bars_since_trigger"] = 0
         return True, reason
 
@@ -526,10 +606,12 @@ class ContinuousLearningSupervisor:
     def run_once(self, now_ts: Optional[pd.Timestamp] = None) -> dict[str, Any]:
         now = floor_to_second(now_ts or pd.Timestamp.now(tz="UTC"))
         now_epoch_s = _to_utc_epoch_s(now)
-        due = due_timeframes(now, self.enabled_timeframes)
+        due_nominal = due_timeframes(now, self.enabled_timeframes)
 
         triggered: list[dict[str, Any]] = []
-        for tf in due:
+        # Probe all enabled timeframes each tick to avoid missing closes when
+        # check_interval_sec is not phase-aligned with timeframe boundaries.
+        for tf in self.enabled_timeframes:
             spec = self.domains.get(tf)
             if spec is None or not spec.enabled:
                 continue
@@ -552,7 +634,8 @@ class ContinuousLearningSupervisor:
         self._save_state()
         return {
             "now": str(now),
-            "due": due,
+            "due_nominal": due_nominal,
+            "checked_timeframes": list(self.enabled_timeframes),
             "triggered": triggered,
         }
 
