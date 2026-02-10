@@ -7,6 +7,7 @@ from crypto_rfp_hso.projection.aggregator import (
     ORDER_METHOD_MULT,
     compute_method_weights,
 )
+from crypto_rfp_hso.projection.hazard_surface import hazard_surface_distribution
 
 __all__ = [
     "fit_per_state_t_params",
@@ -14,4 +15,5 @@ __all__ = [
     "G",
     "ORDER_METHOD_MULT",
     "compute_method_weights",
+    "hazard_surface_distribution",
 ]

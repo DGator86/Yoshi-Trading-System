@@ -16,6 +16,10 @@ from crypto_rfp_hso.transitions.semimarkov_propagate import propagate_semi_marko
 from crypto_rfp_hso.projection.per_state_models import fit_per_state_t_params
 from crypto_rfp_hso.projection.fan import build_forward_fan
 from crypto_rfp_hso.overlay.payload import build_overlay_payload
+from crypto_rfp_hso.core.event_time import EVENT_ALPHABET, build_event_time_index
+from crypto_rfp_hso.dynamics.discrete import map_path_and_bands
+from crypto_rfp_hso.dynamics.consensus import venue_consensus_update
+from crypto_rfp_hso.projection.hazard_surface import hazard_surface_distribution
 
 __all__ = [
     "bucketize_prints_notional",
@@ -29,4 +33,9 @@ __all__ = [
     "fit_per_state_t_params",
     "build_forward_fan",
     "build_overlay_payload",
+    "EVENT_ALPHABET",
+    "build_event_time_index",
+    "map_path_and_bands",
+    "venue_consensus_update",
+    "hazard_surface_distribution",
 ]

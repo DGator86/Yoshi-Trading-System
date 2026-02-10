@@ -9,17 +9,21 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from crypto_rfp_hso import (  # noqa: E402
+    EVENT_ALPHABET,
     bucketize_prints_notional,
+    build_event_time_index,
     build_forward_fan,
     build_overlay_payload,
     compute_feature_signature,
     compute_node_posterior,
     fit_per_state_t_params,
+    map_path_and_bands,
     fit_semi_markov_params,
     hilbert_project,
     hurst_ghe,
     propagate_semi_markov,
     score_orders,
+    venue_consensus_update,
 )
 from crypto_rfp_hso.features.normalize import signature_to_vector  # noqa: E402
 from crypto_rfp_hso.hilbert.templates_fit import (  # noqa: E402
@@ -252,3 +256,95 @@ def test_hurst_signature_stability():
         q=2.0,
     )
     assert 0.2 <= h <= 0.8
+
+
+def test_event_time_quantization_modes_are_explicit_and_bounded():
+    prints = _make_prints()
+    buckets = bucketize_prints_notional(prints, notional_usd=2_000_000.0)
+    l2 = _make_l2_for_buckets(buckets)
+    perp = _make_perp_for_buckets(buckets)
+    coupling_inputs = _coupling_inputs_from_buckets(buckets)
+
+    signatures = {
+        k: compute_feature_signature(
+            buckets=buckets,
+            k=k,
+            l2_snapshots=l2,
+            perp_metrics=perp,
+            coupling_inputs=coupling_inputs,
+            config={},
+        )
+        for k in range(len(buckets))
+    }
+    for k, b in enumerate(buckets):
+        signatures[k]["notional_k"] = float(b.get("notional", 0.0))
+
+    canonical = build_event_time_index(
+        buckets=buckets,
+        signatures=signatures,
+        mode="canonical",
+        config={},
+    )
+    assert len(canonical["tau"]) == len(buckets)
+    assert all(abs(dt - 1.0) < 1e-12 for dt in canonical["delta_tau"])
+
+    weighted = build_event_time_index(
+        buckets=buckets,
+        signatures=signatures,
+        mode="information",
+        config={
+            "tau_w_min": 0.5,
+            "tau_w_max": 2.0,
+        },
+    )
+    assert len(weighted["tau"]) == len(buckets)
+    assert all(0.5 <= dt <= 2.0 for dt in weighted["delta_tau"])
+    assert EVENT_ALPHABET[0] == "trade"
+    assert EVENT_ALPHABET[-1] == "mev_bundle"
+
+
+def test_map_path_sigma_bands_and_consensus_operator():
+    seq_len = 8
+    path = map_path_and_bands(
+        x0_log=math.log(50_000.0),
+        delta_tau_seq=[1.0] * seq_len,
+        funding_force_seq=[0.0001] * seq_len,
+        arb_force_seq=[0.00005] * seq_len,
+        expected_impulse_seq=[0.0] * seq_len,
+        sigma0=0.001,
+        theta_seq=[1.2] * seq_len,
+        tau0=10.0,
+    )
+    assert len(path) == seq_len
+    for row in path:
+        assert row["sigma2_low"] <= row["sigma1_low"] <= row["p_map"] <= row["sigma1_high"] <= row["sigma2_high"]
+        assert row["tau_event"] > 10.0
+
+    venues = {"binance": 100.0, "okx": 101.0, "bybit": 99.5}
+    liq = {"binance": 10.0, "okx": 8.0, "bybit": 6.0}
+    before_disp = max(venues.values()) - min(venues.values())
+    updated = venue_consensus_update(venues, liq, kappa_arb=0.5)
+    after_disp = max(updated.values()) - min(updated.values())
+    assert after_disp < before_disp
+
+
+def test_build_history_includes_event_time_and_map_outputs():
+    prints = _make_prints()
+    buckets = bucketize_prints_notional(prints, notional_usd=2_000_000.0)
+    l2 = _make_l2_for_buckets(buckets)
+    perp = _make_perp_for_buckets(buckets)
+    coupling_inputs = _coupling_inputs_from_buckets(buckets)
+
+    built = build_history(
+        buckets=buckets,
+        l2_snapshots=l2,
+        perp_metrics=perp,
+        coupling_inputs=coupling_inputs,
+        config={"tau_mode": "information"},
+    )
+    assert "event_time" in built
+    assert len(built["event_time"]["tau"]) == len(buckets)
+    assert built["payload"]["forward"]["map_path"]
+    assert built["payload"]["forward"]["next_price_distribution"]["p_star"] > 0.0
+    first_hist = built["payload"]["historical"][0]
+    assert "tau" in first_hist and "delta_tau" in first_hist

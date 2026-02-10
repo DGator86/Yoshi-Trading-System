@@ -7,6 +7,7 @@ class PrintBucket(TypedDict, total=False):
     """Event-time print bucket schema."""
 
     k: int
+    event_type: str
     symbol: str
     timestamp_start: int | float | str
     timestamp_end: int | float | str
@@ -52,9 +53,22 @@ DEFAULT_CONFIG = {
     "forward_horizons": [1, 2, 4, 8, 16, 32],
     "fan_quantiles": [0.05, 0.50, 0.95],
     "entropy_epsilon": 1e-9,
+    # Explicit event-time mode: "canonical" (delta_tau=1) or "information" (weighted).
+    "tau_mode": "canonical",
+    "tau_beta": 0.6,
+    "tau_gamma": 0.4,
+    "tau_delta": 0.4,
+    "tau_w_min": 0.25,
+    "tau_w_max": 4.0,
     "impact_notional_usd": 100_000.0,
     "shock_gap_sigma_mult": 4.0,
     "h_min": 0.01,
     "h_max": 0.99,
     "base_alpha": 0.7,
+    # Event-time diffusion temperature multipliers.
+    "theta_alpha_f": 1.0,
+    "theta_beta_l": 1.0,
+    # Hazard surface controls.
+    "hazard_grid_size": 121,
+    "hazard_band_mult": 3.0,
 }

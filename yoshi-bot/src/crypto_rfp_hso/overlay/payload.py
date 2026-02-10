@@ -33,9 +33,16 @@ def build_overlay_payload(
         historical.append(
             {
                 "k": k,
+                "tau": b.get("tau", k + 1),
+                "delta_tau": b.get("delta_tau", 1.0),
                 "timestamp_start": b.get("timestamp_start"),
                 "timestamp_end": b.get("timestamp_end"),
                 "close": float(b.get("close", 0.0)),
+                "activity": float(b.get("activity", 0.0)),
+                "curvature": float(b.get("curvature", 0.0)),
+                "funding_force": float(b.get("funding_force", 0.0)),
+                "lhi": float(b.get("lhi", 0.0)),
+                "theta": float(b.get("theta", 1.0)),
                 "w_class": h.get("w_class", {}),
                 "dominant_class": h.get("dominant_class"),
                 "entropy_norm": entropy_now,
