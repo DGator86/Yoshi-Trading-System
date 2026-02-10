@@ -67,6 +67,56 @@ sudo systemctl enable --now crypto-source-scanner
 sudo systemctl status crypto-source-scanner
 ```
 
+## Continuous Learning + Optimization Supervisor (Always-On)
+
+To keep ML/backtests/hyperparameter adaptation running continuously, use the
+domain-triggered supervisor:
+
+```bash
+python3 yoshi-bot/scripts/run_continuous_learning.py \
+  --config yoshi-bot/configs/continuous_learning.yaml
+```
+
+It monitors timeframe close events and triggers a full cycle when each domain
+accumulates `n=2000` new bars:
+- run experiment (with Ralph Loop hyperparameter selection if `hparams.yaml` is set)
+- run backtest on generated predictions
+- optional extra improvement-loop run
+
+### One-shot scheduler tick
+```bash
+python3 yoshi-bot/scripts/run_continuous_learning.py --once \
+  --config yoshi-bot/configs/continuous_learning.yaml
+```
+
+### systemd service
+
+Service unit: `services/continuous-learning.service`
+
+```bash
+sudo cp services/continuous-learning.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now continuous-learning
+sudo systemctl status continuous-learning
+```
+
+State is persisted at:
+- `reports/continuous/supervisor_state.json`
+
+#### Practical cadence with `n=2000`
+
+If you keep `trigger_n=2000`, the nominal trigger cadence per domain is:
+- `1m`: ~33h
+- `5m`: ~6.9d
+- `15m`: ~20.8d
+- `30m`: ~41.7d
+- `1h`: ~83.3d
+- `4h`: ~333d
+- `1d`: ~2000d
+
+So for faster adaptation, lower `trigger_n` on higher timeframes (for example
+`1h: 240`, `4h: 90`, `1d: 30`) while keeping `1m/5m` closer to 2000.
+
 ## Crypto Price-as-a-Particle (Strengthened Approach)
 
 For the crypto-first, physics-consistent interpretation of VWAP, EMA, Bollinger Bands,
