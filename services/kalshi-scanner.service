@@ -5,6 +5,8 @@ After=trading-core.service
 [Service]
 User=root
 WorkingDirectory=/root/Yoshi-Trading-System
+Environment=TRADING_CORE_URL=http://127.0.0.1:8000
+Environment=YOSHI_OUTBOX_DIR=data/outbox
 ExecStart=/usr/bin/python3 yoshi-bot/scripts/kalshi_scanner.py --symbol BTCUSDT --loop --bridge --live
 Restart=always
 RestartSec=10

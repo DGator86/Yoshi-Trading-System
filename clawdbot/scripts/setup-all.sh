@@ -524,14 +524,16 @@ ok "clawdbot.service (with auto-fix on boot)"
 
 cat > /etc/systemd/system/yoshi-bridge.service << SVCEOF
 [Unit]
-Description=Yoshi-Bridge Scanner to Trading Core
+Description=Yoshi-Bridge Outbox to Trading Core
 After=network.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=$CLAWDBOT_DIR
-ExecStart=/usr/bin/python3 $CLAWDBOT_DIR/scripts/yoshi-bridge.py --log-path $SCANNER_LOG --poll-interval 30 --min-edge 5.0
+Environment=TRADING_CORE_URL=http://127.0.0.1:8000
+Environment=YOSHI_OUTBOX_DIR=$YOSHI_DIR/data/outbox
+ExecStart=/usr/bin/python3 $CLAWDBOT_DIR/scripts/yoshi-bridge.py --poll-interval 10 --max-send 100
 Restart=always
 RestartSec=15
 StandardOutput=journal

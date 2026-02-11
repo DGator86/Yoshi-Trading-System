@@ -12,11 +12,11 @@ kalshi_scanner.py (loop)              moltbot gateway :18789
   | Fetches OHLCV data                  | yoshi-trading skill
   | Runs PriceTimeManifold              | Reads Trading Core API
   | Finds Kalshi edge opportunities     | Formats trade suggestions
-  | Writes to scanner.log               | Sends to Telegram
+  | Enqueues proposals to outbox        | Sends to Telegram
   v                                     v
 yoshi-bridge.py                       You (Telegram)
-  | Watches scanner.log                 | "What's Yoshi's status?"
-  | Parses signals (edge, strike, etc)  | "Show me positions"
+  | Flushes proposal outbox             | "What's Yoshi's status?"
+  | Forwards /propose requests          | "Show me positions"
   | POSTs to Trading Core /propose      | "approve" / "pass"
   v                                     |
 Trading Core API :8000  <---------------+
@@ -69,7 +69,7 @@ chmod +x scripts/deploy-bridge.sh
 
 This installs and starts:
 - **clawdbot** service (moltbot gateway + Telegram + yoshi-trading skill)
-- **yoshi-bridge** service (scanner log watcher -> Trading Core /propose)
+- **yoshi-bridge** service (proposal outbox -> Trading Core /propose)
 
 The deploy script will also prompt for Kalshi API credentials if not already configured.
 
@@ -280,7 +280,7 @@ ClawdBot-V1/
 │   ├── fix-gateway.sh              # Nuclear gateway fix (kills stale, rebuilds config)
 │   ├── setup-all.sh                # All-in-one VPS setup (curl-friendly)
 │   ├── rebuild-config.py           # Rebuild moltbot.json with model selection
-│   ├── yoshi-bridge.py             # Scanner log -> Trading Core bridge
+│   ├── yoshi-bridge.py             # Proposal outbox -> Trading Core bridge
 │   ├── kalshi-edge-scanner.py      # Continuous Kalshi best-pick finder
 │   ├── kalshi-order.py             # Kalshi order placement helper
 │   ├── lib/

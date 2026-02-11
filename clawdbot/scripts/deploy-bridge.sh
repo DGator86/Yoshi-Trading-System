@@ -7,7 +7,7 @@ set -e
 #
 #  Deploys:
 #    1. ClawdBot (moltbot gateway) with yoshi-trading skill
-#    2. Yoshi-Bridge (scanner log -> Trading Core /propose)
+#    2. Yoshi-Bridge (proposal outbox -> Trading Core /propose)
 #    3. Systemd services for both
 #
 #  Prerequisites:
@@ -244,12 +244,12 @@ fi
 # ------- 6. Install yoshi-bridge systemd service -------
 echo -e "\n${YELLOW}[6/8] Installing yoshi-bridge service...${NC}"
 
-SCANNER_LOG="$YOSHI_DIR/logs/scanner.log"
-mkdir -p "$YOSHI_DIR/logs"
+OUTBOX_ROOT="${YOSHI_OUTBOX_DIR:-$YOSHI_DIR/data/outbox}"
+mkdir -p "$OUTBOX_ROOT/proposals" "$OUTBOX_ROOT/sent"
 
 cat > /etc/systemd/system/yoshi-bridge.service << EOF
 [Unit]
-Description=Yoshi-Bridge — Scanner signals to Trading Core
+Description=Yoshi-Bridge — Outbox proposals to Trading Core
 After=network.target
 Wants=clawdbot.service
 
@@ -257,7 +257,9 @@ Wants=clawdbot.service
 Type=simple
 User=root
 WorkingDirectory=$CLAWDBOT_DIR
-ExecStart=/usr/bin/python3 $CLAWDBOT_DIR/scripts/yoshi-bridge.py --log-path $SCANNER_LOG --poll-interval 30 --min-edge 5.0
+Environment=TRADING_CORE_URL=http://127.0.0.1:8000
+Environment=YOSHI_OUTBOX_DIR=$OUTBOX_ROOT
+ExecStart=/usr/bin/python3 $CLAWDBOT_DIR/scripts/yoshi-bridge.py --poll-interval 10 --max-send 100
 Restart=always
 RestartSec=15
 StandardOutput=journal
@@ -302,7 +304,7 @@ echo -e "\n${YELLOW}[8/8] Starting services...${NC}"
 systemctl daemon-reload
 systemctl enable yoshi-bridge clawdbot
 
-# Start yoshi-bridge first (it just watches logs)
+# Start yoshi-bridge first (it flushes the proposal outbox)
 systemctl restart yoshi-bridge
 sleep 2
 
@@ -317,7 +319,7 @@ echo -e "==========================================${NC}"
 echo ""
 echo "Services:"
 echo -e "  ${GREEN}clawdbot${NC}      — moltbot gateway on :18789 + Telegram"
-echo -e "  ${GREEN}yoshi-bridge${NC}  — scanner log watcher -> Trading Core /propose"
+echo -e "  ${GREEN}yoshi-bridge${NC}  — proposal outbox -> Trading Core /propose"
 echo ""
 echo "Status:"
 systemctl status clawdbot --no-pager -l 2>/dev/null | head -5 || true
@@ -333,7 +335,7 @@ echo "  curl -s http://127.0.0.1:8000/status # Yoshi Trading Core"
 echo "  moltbot status                       # Moltbot status"
 echo ""
 echo -e "${CYAN}Architecture:${NC}"
-echo "  Yoshi Scanner -> scanner.log -> yoshi-bridge -> Trading Core :8000 /propose"
+echo "  Yoshi Scanner -> outbox -> yoshi-bridge -> Trading Core :8000 /propose"
 echo "  ClawdBot (moltbot :18789) -> reads Trading Core :8000 -> Telegram suggestions"
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"

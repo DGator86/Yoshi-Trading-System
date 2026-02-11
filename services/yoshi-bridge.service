@@ -1,11 +1,14 @@
 [Unit]
-Description=Yoshi Bridge (Scanner -> Trading Core)
-After=kalshi-scanner.service
+Description=Yoshi Bridge (Outbox -> Trading Core)
+After=trading-core.service
+Wants=trading-core.service
 
 [Service]
 User=root
 WorkingDirectory=/root/Yoshi-Trading-System
-ExecStart=/usr/bin/python3 clawdbot/scripts/yoshi-bridge.py --poll-interval 10
+Environment=TRADING_CORE_URL=http://127.0.0.1:8000
+Environment=YOSHI_OUTBOX_DIR=data/outbox
+ExecStart=/usr/bin/python3 clawdbot/scripts/yoshi-bridge.py --poll-interval 10 --max-send 100
 Restart=always
 RestartSec=10
 StandardOutput=journal

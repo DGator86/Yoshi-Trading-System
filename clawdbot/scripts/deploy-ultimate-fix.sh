@@ -420,7 +420,7 @@ ok "kalshi-edge-scanner.service"
 # ── Yoshi Bridge ──
 cat > /etc/systemd/system/yoshi-bridge.service << SVCEOF
 [Unit]
-Description=Yoshi Bridge — Scanner Log to Trading Core (Ultimate-Fix)
+Description=Yoshi Bridge — Outbox to Trading Core (Ultimate-Fix)
 After=network.target
 PartOf=clawdbot.service
 
@@ -431,9 +431,10 @@ WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=-$PROJECT_DIR/.env
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=TRADING_CORE_URL=http://127.0.0.1:8000
+Environment=YOSHI_OUTBOX_DIR=$PROJECT_DIR/data/outbox
 Environment=PYTHONPATH=$PROJECT_DIR
 
-ExecStart=/usr/bin/python3 $PROJECT_DIR/scripts/yoshi-bridge.py --poll-interval 30
+ExecStart=/usr/bin/python3 $PROJECT_DIR/scripts/yoshi-bridge.py --poll-interval 10 --max-send 100
 Restart=always
 RestartSec=15
 StartLimitIntervalSec=600
