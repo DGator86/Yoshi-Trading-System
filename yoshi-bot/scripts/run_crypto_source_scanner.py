@@ -18,10 +18,10 @@ try:
 except ImportError:
     pass
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add yoshi-bot/src to path so `import gnosis` works.
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from src.gnosis.ingest.source_scanner import (  # noqa: E402
+from gnosis.ingest.source_scanner import (  # noqa: E402
     CryptoSourceScanner,
     CryptoSourceScannerConfig,
 )

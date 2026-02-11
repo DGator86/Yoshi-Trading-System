@@ -10,6 +10,9 @@ from pathlib import Path
 
 import pandas as pd
 
+# Add yoshi-bot/src to path so `import gnosis` works.
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
 # Load local secrets from yoshi-bot/.env if present.
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -20,10 +23,7 @@ try:
 except ImportError:
     pass
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.gnosis.loop.continuous_learning import (  # noqa: E402
+from gnosis.loop.continuous_learning import (  # noqa: E402
     ContinuousLearningConfig,
     ContinuousLearningSupervisor,
 )
