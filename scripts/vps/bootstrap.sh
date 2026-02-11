@@ -54,7 +54,14 @@ clone_or_update() {
     git clone "$REPO_URL" "$APP_DIR"
     cd "$APP_DIR"
   fi
-  git checkout "$BRANCH"
+  # Robust branch checkout (works even if branch not created locally yet)
+  if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    git checkout -B "$BRANCH" "origin/$BRANCH"
+  else
+    git checkout "$BRANCH" 2>/dev/null || true
+    git fetch origin "$BRANCH" >/dev/null 2>&1 || true
+    git checkout -B "$BRANCH" "origin/$BRANCH"
+  fi
   git pull origin "$BRANCH"
   ok "Repo at $APP_DIR on $BRANCH"
 }
