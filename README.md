@@ -105,7 +105,7 @@ Located in `/clawdbot`, this handles user interaction and deployment.
 **Current Status:**
 
 * ✅ **Telegram Integration**: Fully Functional
-* ✅ **VPS Deployment**: Active (165.245.140.115)
+* ✅ **VPS Deployment**: Active (set `VPS_IP` in `.env` / deployment config)
 * ✅ **Physics Engine**: v2.1 (Implemented)
 * ⚠️ **Live Data Feeds**: Refactoring for reliability (Known Gap)
 * ❌ **Advanced Features**: Gamma Fields, Cross-Exchange Funding (See `FEATURE_GAPS.md`)

@@ -3,7 +3,7 @@ set -e
 
 # ==========================================================
 #  ClawdBot + Yoshi Bridge Deployment Script
-#  Run this on the Clawd-Server VPS (165.245.140.115)
+#  Run this on your VPS (do not hardcode IPs in repo docs)
 #
 #  Deploys:
 #    1. ClawdBot (moltbot gateway) with yoshi-trading skill

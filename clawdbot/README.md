@@ -42,7 +42,7 @@ Trading Core API :8000  <---------------+
 ### 1. Connect to Your Droplet
 
 ```bash
-ssh root@165.245.140.115
+ssh root@<YOUR_VPS_IP>
 ```
 
 ### 2. Clone the Repository
@@ -310,8 +310,8 @@ ClawdBot-V1/
 ## DigitalOcean Droplet Details
 
 - **Name**: Clawd-Server
-- **Public IP**: 165.245.140.115
-- **Private IP**: 10.128.0.2
+- **Public IP**: (do not commit; set `VPS_IP` in `.env`)
+- **Private IP**: (do not commit)
 - **Region**: ATL1 (Atlanta)
 - **Specs**: 8 GB Memory / 2 Intel vCPUs / 160 GB Disk
 - **OS**: Ubuntu 24.04 (LTS) x64
