@@ -25,6 +25,27 @@ continuous_learning:
   ccxt_rate_limit_ms: 300
   ccxt_sandbox: false
 
+  # Metadata-only module-gating context logged per domain run.
+  # These values do not execute trades directly; they annotate run summaries
+  # with active module weights/confidence for monitoring and analysis.
+  forecast_gating_enabled: true
+  forecast_gating_defaults:
+    regime_probs:
+      trend_up: 0.20
+      trend_down: 0.20
+      range: 0.40
+      cascade_risk: 0.10
+      volatility_expansion: 0.10
+    spread_bps: 6.0
+    depth_norm: 0.80
+    lfi: 0.40
+    jump_probability: 0.08
+    event_window: false
+  forecast_gating_policy:
+    cascade_prob_threshold: 0.30
+    jump_high_threshold: 0.20
+    lfi_high_threshold: 1.0
+
   # n=2000 is the rolling fetch/backtest window, not the trigger cadence.
   domains:
     - timeframe: 1m
@@ -39,6 +60,10 @@ continuous_learning:
       forecast_horizon_bars: 1
       min_wall_interval_sec: 0
       enabled: true
+      forecast_gating_inputs:
+        # Example domain override: slightly more cautious 5m fragility prior.
+        lfi: 0.55
+        jump_probability: 0.10
     - timeframe: 15m
       fetch_n: 2000
       run_every_bars: 1

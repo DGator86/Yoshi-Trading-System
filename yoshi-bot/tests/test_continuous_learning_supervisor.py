@@ -125,3 +125,39 @@ def test_domain_spec_back_compat_trigger_n_maps_to_fetch_n():
     )
     assert spec.fetch_n == 2000
     assert spec.run_every_bars == 2
+
+
+def test_run_metadata_includes_forecasting_gating_weights_and_confidence(tmp_path: Path):
+    runner = _FakeRunner()
+    spec = DomainSpec(
+        timeframe="1m",
+        fetch_n=2000,
+        run_every_bars=1,
+        enabled=True,
+        forecast_gating_inputs={
+            "regime_probs": {"cascade_risk": 0.55, "range": 0.15, "trend_up": 0.30},
+            "spread_bps": 15.0,
+            "depth_norm": 0.25,
+            "lfi": 1.7,
+            "jump_probability": 0.30,
+        },
+    )
+    config = _cfg(tmp_path, domains=[spec], bootstrap_run=False)
+    supervisor = ContinuousLearningSupervisor(
+        config=config,
+        candle_fetcher=_FakeFetcher(),
+        job_runner=runner,
+    )
+
+    supervisor.run_once(now_ts=pd.Timestamp("2024-01-01T00:01:00Z"))
+
+    assert len(runner.calls) == 1
+    snap = runner.calls[0]["state_snapshot"]
+    gating = snap["forecasting_gating"]
+    assert "weights" in gating and "confidence" in gating
+    assert 0.0 < gating["confidence"] <= 1.0
+    assert gating["weights"]["derivatives_positioning"] > gating["weights"]["technical_price_action"]
+
+    dstate = supervisor.state["domains"]["1m"]
+    assert "forecasting_gating" in dstate["last_run_meta"]
+    assert dstate["last_forecasting_gating"]["top_modules"]

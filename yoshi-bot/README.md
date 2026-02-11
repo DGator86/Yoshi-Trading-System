@@ -106,6 +106,10 @@ sudo systemctl status continuous-learning
 State is persisted at:
 - `reports/continuous/supervisor_state.json`
 
+Per-domain run summaries now also include active forecasting module weights and
+confidence (from the modular taxonomy gating scaffold) in:
+- `reports/continuous/<timeframe>/<run_id>/domain_run_summary.json`
+
 #### Practical settings
 
 - Trigger cadence:

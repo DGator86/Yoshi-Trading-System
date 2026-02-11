@@ -5,6 +5,8 @@ Semantics:
 - `fetch_n` defines the rolling timeline units used for historical fetch +
   backtest windowing (not trigger cadence).
 - Trigger cadence is controlled by `run_every_bars` (default: every close).
+- Each triggered domain run logs active forecasting module-gating metadata
+  (module weights + confidence scalar) for monitoring.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Protocol
@@ -25,6 +27,11 @@ from typing import Any, Optional, Protocol
 import pandas as pd
 import yaml
 
+from gnosis.forecasting.modular_ensemble import (
+    GatingInputs,
+    GatingPolicyConfig,
+    compute_module_weights,
+)
 from gnosis.mtf.scheduler import due_timeframes, floor_to_second
 from gnosis.mtf.timeframes import TF_SECONDS, TF_LIST
 
@@ -54,6 +61,28 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
 def _format_duration(seconds: float) -> str:
     total = int(max(seconds, 0.0))
     days, rem = divmod(total, 86400)
@@ -74,6 +103,8 @@ class DomainSpec:
 
     fetch_n: rolling timeline units used for data lookback/backtest slices.
     run_every_bars: run domain cycle every N new closed bars.
+    forecast_gating_inputs: optional runtime override inputs for module-gating
+        metadata (`weights` + `confidence`) recorded each tick.
     """
 
     timeframe: str
@@ -82,6 +113,7 @@ class DomainSpec:
     forecast_horizon_bars: int = 1
     min_wall_interval_sec: int = 0
     enabled: bool = True
+    forecast_gating_inputs: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "DomainSpec":
@@ -94,6 +126,7 @@ class DomainSpec:
             forecast_horizon_bars=int(raw.get("forecast_horizon_bars", 1)),
             min_wall_interval_sec=int(raw.get("min_wall_interval_sec", 0)),
             enabled=bool(raw.get("enabled", True)),
+            forecast_gating_inputs=copy.deepcopy(raw.get("forecast_gating_inputs", {})),
         )
 
     def recommended_run_seconds(self) -> int:
@@ -130,6 +163,26 @@ class ContinuousLearningConfig:
 
     ccxt_rate_limit_ms: int = 250
     ccxt_sandbox: bool = False
+
+    # Optional metadata-only forecasting gate context.
+    forecast_gating_enabled: bool = True
+    forecast_gating_defaults: dict[str, Any] = field(
+        default_factory=lambda: {
+            "regime_probs": {
+                "trend_up": 0.20,
+                "trend_down": 0.20,
+                "range": 0.40,
+                "cascade_risk": 0.10,
+                "volatility_expansion": 0.10,
+            },
+            "spread_bps": 6.0,
+            "depth_norm": 0.80,
+            "lfi": 0.40,
+            "jump_probability": 0.08,
+            "event_window": False,
+        }
+    )
+    forecast_gating_policy: dict[str, Any] = field(default_factory=dict)
 
     domains: list[DomainSpec] = field(
         default_factory=lambda: [
@@ -170,6 +223,9 @@ class ContinuousLearningConfig:
             improvement_script=str(cfg.get("improvement_script", "scripts/run_improvement_loop.py")),
             ccxt_rate_limit_ms=int(cfg.get("ccxt_rate_limit_ms", 250)),
             ccxt_sandbox=bool(cfg.get("ccxt_sandbox", False)),
+            forecast_gating_enabled=bool(cfg.get("forecast_gating_enabled", True)),
+            forecast_gating_defaults=copy.deepcopy(cfg.get("forecast_gating_defaults", cls().forecast_gating_defaults)),
+            forecast_gating_policy=copy.deepcopy(cfg.get("forecast_gating_policy", {})),
             domains=domains,
         )
 
@@ -283,6 +339,7 @@ class SubprocessDomainJobRunner:
         self,
         spec: DomainSpec,
         run_dir: Path,
+        gating_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         cfg = self._load_base_experiment_config()
         cfg.setdefault("dataset", {})
@@ -304,6 +361,8 @@ class SubprocessDomainJobRunner:
         cfg["continuous_learning"]["timeframe"] = spec.timeframe
         cfg["continuous_learning"]["fetch_n"] = int(spec.fetch_n)
         cfg["continuous_learning"]["run_every_bars"] = int(spec.run_every_bars)
+        if gating_meta:
+            cfg["continuous_learning"]["forecasting_gating"] = copy.deepcopy(gating_meta)
 
         cfg.setdefault("artifacts", {})
         cfg["artifacts"]["out_dir"] = str(run_dir)
@@ -364,7 +423,8 @@ class SubprocessDomainJobRunner:
         runtime_cfg_dir = self.output_root / "runtime_configs"
         runtime_cfg_dir.mkdir(parents=True, exist_ok=True)
         exp_cfg_path = runtime_cfg_dir / f"experiment_{spec.timeframe}.yaml"
-        exp_cfg = self._build_domain_experiment_config(spec=spec, run_dir=run_dir)
+        gating_meta = copy.deepcopy(state_snapshot.get("forecasting_gating", {}))
+        exp_cfg = self._build_domain_experiment_config(spec=spec, run_dir=run_dir, gating_meta=gating_meta)
         with open(exp_cfg_path, "w", encoding="utf-8") as handle:
             yaml.safe_dump(exp_cfg, handle, sort_keys=False)
 
@@ -383,6 +443,7 @@ class SubprocessDomainJobRunner:
             "state_snapshot": state_snapshot,
             "fetch_n": int(spec.fetch_n),
             "run_every_bars": int(spec.run_every_bars),
+            "forecasting_gating": gating_meta,
             "steps": [],
         }
 
@@ -481,6 +542,7 @@ class ContinuousLearningSupervisor:
         self._log_domain_plan()
 
     def _log_domain_plan(self) -> None:
+        self.logger.info("Forecasting gating metadata enabled=%s", bool(self.config.forecast_gating_enabled))
         for tf, spec in self.domains.items():
             cadence_s = spec.recommended_run_seconds()
             backtest_s = spec.recommended_backtest_window_seconds()
@@ -515,6 +577,7 @@ class ContinuousLearningSupervisor:
             d.setdefault("last_trigger_ok", d.get("last_run_ok", None))
             d.setdefault("runs_total", 0)
             d.setdefault("bootstrap_done", False)
+            d.setdefault("last_forecasting_gating", {})
         return state
 
     def _save_state(self) -> None:
@@ -525,6 +588,73 @@ class ContinuousLearningSupervisor:
 
     def _domain_state(self, timeframe: str) -> dict[str, Any]:
         return self.state["domains"][timeframe]
+
+    @staticmethod
+    def _normalize_regime_probs(raw: dict[str, Any] | None) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for k, v in (raw or {}).items():
+            val = max(_safe_float(v, 0.0), 0.0)
+            if val > 0.0:
+                out[str(k)] = float(val)
+        total = sum(out.values())
+        if total <= 0.0:
+            return {"range": 1.0}
+        return {k: float(v / total) for k, v in out.items()}
+
+    def _build_forecasting_gating_snapshot(self, timeframe: str, run_reason: str) -> dict[str, Any]:
+        """Compute active module weights/confidence for this domain run."""
+        if not bool(self.config.forecast_gating_enabled):
+            return {}
+
+        spec = self.domains[timeframe]
+        merged = copy.deepcopy(self.config.forecast_gating_defaults or {})
+        merged.update(copy.deepcopy(spec.forecast_gating_inputs or {}))
+
+        regime_probs = self._normalize_regime_probs(merged.get("regime_probs", {}))
+        event_window = _safe_bool(merged.get("event_window", False), default=False)
+        if not event_window:
+            # Lightweight heuristic only when explicit event_window is absent.
+            txt = str(run_reason).lower()
+            event_window = any(tok in txt for tok in ("event", "cpi", "fomc", "expiry"))
+
+        g_inputs = GatingInputs(
+            regime_probs=regime_probs,
+            spread_bps=_safe_float(merged.get("spread_bps", 6.0), 6.0),
+            depth_norm=_safe_float(merged.get("depth_norm", 0.8), 0.8),
+            lfi=_safe_float(merged.get("lfi", 0.4), 0.4),
+            jump_probability=_safe_float(merged.get("jump_probability", 0.08), 0.08),
+            event_window=event_window,
+            extra={
+                "timeframe": timeframe,
+                "run_reason": run_reason,
+            },
+        )
+
+        allowed = {f.name for f in dataclass_fields(GatingPolicyConfig)}
+        policy_raw = self.config.forecast_gating_policy or {}
+        policy_kwargs = {k: policy_raw[k] for k in policy_raw if k in allowed}
+        policy = GatingPolicyConfig(**policy_kwargs)
+
+        weights, confidence = compute_module_weights(inputs=g_inputs, config=policy)
+        top_modules = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+        return {
+            "timeframe": timeframe,
+            "run_reason": str(run_reason),
+            "computed_at": _now_iso(),
+            "inputs": {
+                "regime_probs": regime_probs,
+                "spread_bps": float(g_inputs.spread_bps),
+                "depth_norm": float(g_inputs.depth_norm),
+                "lfi": float(g_inputs.lfi),
+                "jump_probability": float(g_inputs.jump_probability),
+                "event_window": bool(g_inputs.event_window),
+            },
+            "policy": {k: policy_kwargs[k] for k in sorted(policy_kwargs.keys())},
+            "weights": {k: float(v) for k, v in weights.items()},
+            "confidence": float(confidence),
+            "top_modules": [{"module": k, "weight": float(v)} for k, v in top_modules],
+        }
 
     def process_closed_bar(
         self,
@@ -573,13 +703,21 @@ class ContinuousLearningSupervisor:
         if not should_trigger:
             return False, reason
 
+        gating_meta = self._build_forecasting_gating_snapshot(timeframe=timeframe, run_reason=reason)
         snapshot = copy.deepcopy(dstate)
+        if gating_meta:
+            snapshot["forecasting_gating"] = copy.deepcopy(gating_meta)
         ok, meta = self.runner.run_domain_job(
             spec=spec,
             run_reason=reason,
             state_snapshot=snapshot,
             now_ts=pd.Timestamp(now_epoch_s, unit="s", tz="UTC"),
         )
+        if not isinstance(meta, dict):
+            meta = {"runner_meta": meta}
+        if gating_meta and "forecasting_gating" not in meta:
+            meta = copy.deepcopy(meta)
+            meta["forecasting_gating"] = copy.deepcopy(gating_meta)
         dstate["last_run_epoch_s"] = int(now_epoch_s)
         dstate["last_run_reason"] = reason
         dstate["last_run_ok"] = bool(ok)
@@ -589,6 +727,8 @@ class ContinuousLearningSupervisor:
         dstate["last_trigger_ok"] = bool(ok)
         dstate["runs_total"] = int(dstate.get("runs_total", 0)) + 1
         dstate["bootstrap_done"] = True
+        if gating_meta:
+            dstate["last_forecasting_gating"] = copy.deepcopy(gating_meta)
         dstate["last_run_meta"] = meta
         if ok:
             dstate["bars_since_run"] = 0
@@ -629,7 +769,16 @@ class ContinuousLearningSupervisor:
                 now_epoch_s=now_epoch_s,
             )
             if did_trigger:
-                triggered.append({"timeframe": tf, "reason": reason})
+                dstate = self._domain_state(tf)
+                gating_meta = (dstate.get("last_run_meta", {}) or {}).get("forecasting_gating", {})
+                triggered.append(
+                    {
+                        "timeframe": tf,
+                        "reason": reason,
+                        "forecast_confidence": gating_meta.get("confidence"),
+                        "top_modules": gating_meta.get("top_modules", []),
+                    }
+                )
 
         self._save_state()
         return {
