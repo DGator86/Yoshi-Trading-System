@@ -192,12 +192,12 @@ if pgrep -f "kalshi_scanner.py" > /dev/null; then
 fi
 
 # Start scanner in background
-mkdir -p "$YOSHI_DIR/logs"
+mkdir -p "$YOSHI_DIR/logs" "$YOSHI_DIR/data/signals"
 cd "$YOSHI_DIR"
 nohup python3 scripts/kalshi_scanner.py \
     --symbol BTCUSDT --loop --interval 300 \
-    --threshold 0.10 --live --exchange kraken \
-    > logs/scanner.log 2>&1 &
+    --threshold 0.10 --live --exchange kraken --bridge \
+    > logs/kalshi-scanner.log 2>&1 &
 
 SCANNER_PID=$!
 sleep 3
@@ -206,7 +206,7 @@ if kill -0 "$SCANNER_PID" 2>/dev/null; then
     echo -e "  ${GREEN}Scanner started (PID: $SCANNER_PID)${NC}"
 else
     echo -e "  ${YELLOW}Scanner may have exited. Check logs:${NC}"
-    echo "  tail -20 $YOSHI_DIR/logs/scanner.log"
+    echo "  tail -20 $YOSHI_DIR/logs/kalshi-scanner.log"
 fi
 
 echo ""
@@ -216,10 +216,12 @@ echo -e "==========================================${NC}"
 echo ""
 echo "  Key ID:      $(grep '^KALSHI_KEY_ID=' "$YOSHI_ENV" | cut -d'=' -f2 | cut -c1-12)..."
 echo "  Private Key:  $KALSHI_KEY_FILE ($(stat -c%a "$KALSHI_KEY_FILE") permissions)"
-echo "  Scanner Log:  $YOSHI_DIR/logs/scanner.log"
+echo "  Scanner Log:  $YOSHI_DIR/logs/kalshi-scanner.log"
+echo "  Signal Queue: $YOSHI_DIR/data/signals/scanner_signals.jsonl"
 echo ""
 echo "Verify:"
-echo "  tail -f $YOSHI_DIR/logs/scanner.log"
+echo "  tail -f $YOSHI_DIR/logs/kalshi-scanner.log"
+echo "  tail -f $YOSHI_DIR/data/signals/scanner_signals.jsonl"
 echo "  curl -s http://127.0.0.1:8000/status | python3 -m json.tool"
 echo ""
 echo "Then tell ClawdBot on Telegram:"

@@ -4,12 +4,12 @@ Kalshi Edge Scanner — Continuous Best-Pick Finder
 ==================================================
 Scans ALL open Kalshi crypto markets every cycle, scores each contract
 by expected value, and surfaces the top 1-2 best trades to ClawdBot
-via the Trading Core /propose endpoint and a local JSON state file.
+via Trading Core proposals, a structured signal queue, and local state.
 
 Runs as a systemd service on the VPS alongside yoshi-bridge.
 
 Architecture:
-  Kalshi API -> kalshi-edge-scanner.py -> top_picks.json + Trading Core /propose
+  Kalshi API -> kalshi-edge-scanner.py -> top_picks.json + scanner_signals.jsonl + /propose
   ClawdBot reads top_picks.json and presents to user via Telegram
 
 Scoring model:
@@ -49,13 +49,21 @@ from kalshi_client import KalshiClient
 
 # Monorepo root for shared trade schema.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from shared.trading_signals import make_trade_signal  # noqa: E402
+from shared.trading_signals import (  # noqa: E402
+    SIGNAL_EVENTS_PATH_DEFAULT,
+    append_event_jsonl,
+    make_trade_signal,
+    wrap_signal_event,
+)
 
 # ── Config ───────────────────────────────────────────────
 TRADING_CORE_URL = os.getenv("TRADING_CORE_URL", "http://127.0.0.1:8000")
 STATE_DIR = Path(__file__).parent.parent  # ClawdBot-V1 root
 STATE_FILE = STATE_DIR / "data" / "top_picks.json"
 LOG_FILE = STATE_DIR / "logs" / "edge-scanner.log"
+SIGNAL_QUEUE_PATH = Path(
+    os.getenv("YOSHI_SIGNAL_QUEUE", f"/root/Yoshi-Bot/{SIGNAL_EVENTS_PATH_DEFAULT}")
+)
 
 # Series we scan
 SERIES = ["KXBTC", "KXETH"]
@@ -706,6 +714,32 @@ def save_state(picks: list[dict], scan_meta: dict):
     log(f"State saved to {STATE_FILE}")
 
 
+def emit_structured_signals(picks: list[dict], signal_path: Path) -> int:
+    """Emit top picks as structured trade_signal events."""
+    emitted = 0
+    for pick in picks:
+        model_prob = float(pick.get("model_prob", 0.5))
+        market_prob = float(pick.get("market_prob", 0.5))
+        action = "BUY_YES" if model_prob >= market_prob else "BUY_NO"
+        signal = make_trade_signal(
+            symbol=SYMBOL_MAP.get(pick.get("series", ""), "BTCUSDT"),
+            ticker=str(pick.get("ticker", "")),
+            action=action,
+            strike=float(pick.get("strike", 0.0)),
+            market_prob=market_prob,
+            model_prob=model_prob,
+            edge=model_prob - market_prob,
+            source="kalshi_edge_scanner",
+        )
+        append_event_jsonl(signal_path, wrap_signal_event(signal))
+        emitted += 1
+        log(
+            "Signal emitted: signal_id=%s idempotency_key=%s path=%s"
+            % (signal.signal_id, signal.idempotency_key, signal_path)
+        )
+    return emitted
+
+
 def main():
     parser = argparse.ArgumentParser(description="Kalshi Edge Scanner")
     parser.add_argument("--loop", action="store_true", help="Run continuously")
@@ -721,6 +755,8 @@ def main():
                         help="Output results as JSON")
     parser.add_argument("--require-ensemble", action="store_true",
                         help="Skip contracts where ensemble is unavailable (no price-distance fallback)")
+    parser.add_argument("--signal-path", type=Path, default=SIGNAL_QUEUE_PATH,
+                        help=f"Structured signal queue path (default: {SIGNAL_QUEUE_PATH})")
     args = parser.parse_args()
 
     global MIN_EDGE_PCT, REQUIRE_ENSEMBLE
@@ -735,7 +771,11 @@ def main():
         log(str(e), "FATAL")
         sys.exit(1)
 
-    log(f"Kalshi Edge Scanner starting (top={args.top}, min_edge={args.min_edge}%, interval={args.interval}s)")
+    log(
+        "Kalshi Edge Scanner starting "
+        f"(top={args.top}, min_edge={args.min_edge}%, interval={args.interval}s, "
+        f"signal_path={args.signal_path})"
+    )
 
     cycle = 0
     while True:
@@ -767,21 +807,15 @@ def main():
             # Save state for ClawdBot
             save_state(picks, scan_meta)
 
-            # Write to scanner log (for yoshi-bridge to pick up)
             alert_text = format_telegram_alert(picks)
             print(f"\n{alert_text}\n")
 
-            # Write alert to Yoshi scanner log so yoshi-bridge forwards it
-            for yoshi_log in ["/root/Yoshi-Bot/logs/scanner.log",
-                              "/home/root/Yoshi-Bot/logs/scanner.log"]:
-                try:
-                    Path(yoshi_log).parent.mkdir(parents=True, exist_ok=True)
-                    with open(yoshi_log, "a") as f:
-                        f.write(f"\n{alert_text}\n")
-                    log(f"Alert written to {yoshi_log}")
-                    break
-                except Exception:
-                    continue
+            # Emit structured signals for yoshi-bridge ingestion.
+            try:
+                emitted = emit_structured_signals(picks, args.signal_path)
+                log(f"Structured signals emitted: {emitted}")
+            except Exception as e:
+                log(f"Signal emission failed: {e}", "WARN")
 
             # Propose to Trading Core if requested
             if args.propose and picks:

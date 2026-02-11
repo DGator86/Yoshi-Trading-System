@@ -7,7 +7,7 @@ set -e
 #
 #  Deploys:
 #    1. ClawdBot (moltbot gateway) with yoshi-trading skill
-#    2. Yoshi-Bridge (scanner log -> Trading Core /propose)
+#    2. Yoshi-Bridge (structured signal queue -> Trading Core /propose)
 #    3. Systemd services for both
 #
 #  Prerequisites:
@@ -302,7 +302,7 @@ echo -e "\n${YELLOW}[8/8] Starting services...${NC}"
 systemctl daemon-reload
 systemctl enable yoshi-bridge clawdbot
 
-# Start yoshi-bridge first (it just watches logs)
+# Start yoshi-bridge first (it tails the structured signal queue)
 systemctl restart yoshi-bridge
 sleep 2
 
@@ -317,7 +317,7 @@ echo -e "==========================================${NC}"
 echo ""
 echo "Services:"
 echo -e "  ${GREEN}clawdbot${NC}      — moltbot gateway on :18789 + Telegram"
-echo -e "  ${GREEN}yoshi-bridge${NC}  — scanner log watcher -> Trading Core /propose"
+echo -e "  ${GREEN}yoshi-bridge${NC}  — structured signal queue -> Trading Core /propose"
 echo ""
 echo "Status:"
 systemctl status clawdbot --no-pager -l 2>/dev/null | head -5 || true

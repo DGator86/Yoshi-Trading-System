@@ -42,9 +42,9 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "⚙️ Starting services on VPS..." -ForegroundColor Cyan
 
 # Build the command as a single line string including pkill for clean restart
-$remoteCmd = "cd /root/${DEST_DIR}; pkill -f scripts/kalshi_scanner.py || true; pkill -f scripts/monitor_vps.py || true; chmod +x vps_setup.sh; ./vps_setup.sh; mkdir -p logs; . venv/bin/activate; nohup python3 scripts/kalshi_scanner.py --symbol BTCUSDT --loop --interval 300 --threshold 0.10 > logs/scanner.log 2>&1 & nohup python3 scripts/monitor_vps.py > logs/monitor.log 2>&1 &"
+$remoteCmd = "cd /root/${DEST_DIR}; pkill -f scripts/kalshi_scanner.py || true; pkill -f scripts/monitor_vps.py || true; chmod +x vps_setup.sh; ./vps_setup.sh; mkdir -p logs data/signals; . venv/bin/activate; nohup python3 scripts/kalshi_scanner.py --symbol BTCUSDT --loop --interval 300 --threshold 0.10 --bridge > logs/kalshi-scanner.log 2>&1 & nohup python3 scripts/monitor_vps.py > logs/monitor.log 2>&1 &"
 
 ssh "root@${VPS_IP}" $remoteCmd
 
 Write-Host "✅ Deployment Complete!" -ForegroundColor Green
-Write-Host "Check logs on VPS: tail -f ~/gnosis_particle_bot/logs/scanner.log" -ForegroundColor Yellow
+Write-Host "Check logs on VPS: tail -f ~/gnosis_particle_bot/logs/kalshi-scanner.log" -ForegroundColor Yellow

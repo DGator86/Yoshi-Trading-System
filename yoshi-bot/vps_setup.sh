@@ -17,8 +17,8 @@ source venv/bin/activate
 # Since we don't have a requirements.txt, we install known dependencies
 pip install numpy pandas scipy requests python-dotenv aiohttp cryptography pyarrow ccxt
 
-# 5. Setup Logging Directory
-mkdir -p logs
+# 5. Setup runtime directories
+mkdir -p logs data/signals
 
 # 6. Ensure .env exists
 if [ ! -f .env ]; then
@@ -27,4 +27,4 @@ fi
 
 echo "✅ Setup Complete. To start the scanner, run:"
 echo "source venv/bin/activate"
-echo "nohup python3 scripts/kalshi_scanner.py --symbol BTCUSDT --loop --interval 300 --threshold 0.10 > logs/scanner.log 2>&1 &"
+echo "nohup python3 scripts/kalshi_scanner.py --symbol BTCUSDT --loop --interval 300 --threshold 0.10 --bridge > logs/kalshi-scanner.log 2>&1 &"

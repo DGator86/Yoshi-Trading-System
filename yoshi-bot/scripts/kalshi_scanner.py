@@ -40,7 +40,8 @@ load_dotenv()
 kalshi = KalshiClient()
 
 # Set up logging
-log_file = Path("scanner.log")
+log_file = Path("logs/kalshi-scanner-runtime.log")
+log_file.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",

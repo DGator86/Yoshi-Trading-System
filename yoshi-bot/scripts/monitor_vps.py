@@ -62,8 +62,8 @@ def monitor():
             subprocess.Popen(
                 "nohup python3 scripts/kalshi_scanner.py --symbol BTCUSDT "
                 "--loop --interval 300 --threshold 0.10 "
-                "--live --exchange kraken "
-                "> logs/scanner.log 2>&1 &",
+                "--live --exchange kraken --bridge "
+                "> logs/kalshi-scanner.log 2>&1 &",
                 shell=True
             )
             time.sleep(5)

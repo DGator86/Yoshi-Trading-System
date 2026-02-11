@@ -418,7 +418,7 @@ The ensemble combines:
 Check for recent signals:
 
 ```bash
-tail -100 /root/ClawdBot-V1/logs/edge-scanner.log 2>/dev/null || tail -100 /root/Yoshi-Bot/logs/scanner.log 2>/dev/null || echo "Scanner log not found"
+tail -100 /root/ClawdBot-V1/logs/edge-scanner.log 2>/dev/null || tail -100 /root/Yoshi-Bot/data/signals/scanner_signals.jsonl 2>/dev/null || tail -100 /root/Yoshi-Bot/logs/kalshi-scanner.log 2>/dev/null || echo "Scanner signal queue/log not found"
 ```
 
 ---
