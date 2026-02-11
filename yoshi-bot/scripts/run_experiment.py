@@ -257,7 +257,20 @@ def apply_abstain_logic(
 
     # Get S_label and S_pmax from features for matching rows
     s_info = features_df[["symbol", "bar_idx", "S_label", "S_pmax"]].copy()
-    result = result.merge(s_info, on=["symbol", "bar_idx"], how="left")
+    # If predictions already carry S_* (passthrough), keep them and only fill gaps.
+    result = result.merge(s_info, on=["symbol", "bar_idx"], how="left", suffixes=("", "_feat"))
+    if "S_label_feat" in result.columns:
+        if "S_label" not in result.columns:
+            result["S_label"] = result["S_label_feat"]
+        else:
+            result["S_label"] = result["S_label"].fillna(result["S_label_feat"])
+        result = result.drop(columns=["S_label_feat"], errors="ignore")
+    if "S_pmax_feat" in result.columns:
+        if "S_pmax" not in result.columns:
+            result["S_pmax"] = result["S_pmax_feat"]
+        else:
+            result["S_pmax"] = result["S_pmax"].fillna(result["S_pmax_feat"])
+        result = result.drop(columns=["S_pmax_feat"], errors="ignore")
 
     # Get default confidence floor from config
     constraints = regimes_config.get("constraints_by_species", {})
