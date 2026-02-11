@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "pandas",
+    "pyarrow",
     "scipy",
     "scikit-learn",
     "matplotlib",
