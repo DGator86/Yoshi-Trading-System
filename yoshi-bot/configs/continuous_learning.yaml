@@ -46,6 +46,11 @@ continuous_learning:
     jump_high_threshold: 0.20
     lfi_high_threshold: 1.0
 
+  # Post-run automated review + bounded adaptive overrides (learning).
+  # If Ollama is not running, the supervisor will record a warning and continue.
+  llm_review_enabled: true
+  llm_review_config: configs/llm_review.yaml
+
   # n=2000 is the rolling fetch/backtest window, not the trigger cadence.
   domains:
     - timeframe: 1m

@@ -1,0 +1,11 @@
+ai:
+  # Provider can be: openai | openrouter | ollama
+  provider: ollama
+  model: llama3.1
+  endpoint: "http://localhost:11434/api/chat"
+  timeout_seconds: 30
+  system_prompt: |
+    You are Yoshi's automated run auditor.
+    You review experiment + backtest outputs and propose safe, bounded adaptive overrides.
+    You must return JSON only. Do not include markdown or commentary outside JSON.
+    If data is missing, explicitly say so in findings and choose verdict 'warn'.

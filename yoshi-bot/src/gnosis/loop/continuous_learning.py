@@ -32,6 +32,7 @@ from gnosis.forecasting.modular_ensemble import (
     GatingPolicyConfig,
     compute_module_weights,
 )
+from gnosis.review import LLMResultsReviewer, sanitize_experiment_overrides
 from gnosis.mtf.scheduler import due_timeframes, floor_to_second
 from gnosis.mtf.timeframes import TF_SECONDS, TF_LIST
 
@@ -81,6 +82,16 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
     if s in {"0", "false", "no", "n", "off"}:
         return False
     return bool(default)
+
+
+def _deep_update(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge src into dst (dicts only)."""
+    for k, v in (src or {}).items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_update(dst[k], v)
+        else:
+            dst[k] = copy.deepcopy(v)
+    return dst
 
 
 def _format_duration(seconds: float) -> str:
@@ -184,6 +195,10 @@ class ContinuousLearningConfig:
     )
     forecast_gating_policy: dict[str, Any] = field(default_factory=dict)
 
+    # LLM run reviewer (post-run audit + bounded adaptive overrides).
+    llm_review_enabled: bool = True
+    llm_review_config: str = "configs/llm_review.yaml"
+
     domains: list[DomainSpec] = field(
         default_factory=lambda: [
             DomainSpec(timeframe="1m"),
@@ -226,6 +241,8 @@ class ContinuousLearningConfig:
             forecast_gating_enabled=bool(cfg.get("forecast_gating_enabled", True)),
             forecast_gating_defaults=copy.deepcopy(cfg.get("forecast_gating_defaults", cls().forecast_gating_defaults)),
             forecast_gating_policy=copy.deepcopy(cfg.get("forecast_gating_policy", {})),
+            llm_review_enabled=bool(cfg.get("llm_review_enabled", True)),
+            llm_review_config=str(cfg.get("llm_review_config", "configs/llm_review.yaml")),
             domains=domains,
         )
 
@@ -340,6 +357,7 @@ class SubprocessDomainJobRunner:
         spec: DomainSpec,
         run_dir: Path,
         gating_meta: dict[str, Any] | None = None,
+        adaptive_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         cfg = self._load_base_experiment_config()
         cfg.setdefault("dataset", {})
@@ -366,6 +384,10 @@ class SubprocessDomainJobRunner:
 
         cfg.setdefault("artifacts", {})
         cfg["artifacts"]["out_dir"] = str(run_dir)
+
+        # Apply adaptive overrides last (stateful learning).
+        if isinstance(adaptive_overrides, dict) and adaptive_overrides:
+            _deep_update(cfg, adaptive_overrides)
         return cfg
 
     @staticmethod
@@ -412,6 +434,125 @@ class SubprocessDomainJobRunner:
             )
             return proc.returncode == 0, proc.returncode
 
+    @staticmethod
+    def _normalize_regime_probs(raw: dict[str, Any] | None) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for k, v in (raw or {}).items():
+            try:
+                val = float(v)
+            except (TypeError, ValueError):
+                continue
+            val = max(val, 0.0)
+            if val > 0.0:
+                out[str(k)] = float(val)
+        total = sum(out.values())
+        if total <= 0.0:
+            return {"range": 1.0}
+        return {k: float(v / total) for k, v in out.items()}
+
+    def _compute_forecasting_gating_from_regime_snapshot(
+        self,
+        run_dir: Path,
+        timeframe: str,
+        run_reason: str,
+    ) -> dict[str, Any]:
+        """Compute gating metadata from run_dir/regime_snapshot.json (actual probs)."""
+        if not bool(self.config.forecast_gating_enabled):
+            return {}
+
+        snap_path = run_dir / "regime_snapshot.json"
+        if not snap_path.exists():
+            return {}
+
+        try:
+            with open(snap_path, encoding="utf-8") as handle:
+                snap = json.load(handle) or {}
+        except Exception:
+            return {}
+
+        sym_map = (snap.get("symbols") or {}) if isinstance(snap, dict) else {}
+        if not isinstance(sym_map, dict) or not sym_map:
+            return {}
+
+        # Aggregate symbol-level gating inputs into one snapshot.
+        rp_sum: dict[str, float] = {}
+        spread_sum = 0.0
+        depth_sum = 0.0
+        lfi_sum = 0.0
+        jump_sum = 0.0
+        event_window = False
+        n = 0
+
+        for _sym, payload in sym_map.items():
+            if not isinstance(payload, dict):
+                continue
+            g = payload.get("gating_inputs") or {}
+            if not isinstance(g, dict):
+                continue
+            rp = g.get("regime_probs") or {}
+            if isinstance(rp, dict):
+                for k, v in rp.items():
+                    try:
+                        rp_sum[str(k)] = rp_sum.get(str(k), 0.0) + max(float(v), 0.0)
+                    except (TypeError, ValueError):
+                        continue
+
+            try:
+                spread_sum += float(g.get("spread_bps", 0.0))
+                depth_sum += float(g.get("depth_norm", 0.0))
+                lfi_sum += float(g.get("lfi", 0.0))
+                jump_sum += float(g.get("jump_probability", 0.0))
+            except (TypeError, ValueError):
+                pass
+            event_window = bool(event_window or g.get("event_window", False))
+            n += 1
+
+        if n <= 0:
+            return {}
+
+        regime_probs = self._normalize_regime_probs(rp_sum)
+        g_inputs = GatingInputs(
+            regime_probs=regime_probs,
+            spread_bps=float(spread_sum / n),
+            depth_norm=float(depth_sum / n),
+            lfi=float(lfi_sum / n),
+            jump_probability=float(jump_sum / n),
+            event_window=bool(event_window),
+            extra={
+                "timeframe": timeframe,
+                "run_reason": run_reason,
+                "source": "regime_snapshot",
+                "n_symbols": int(n),
+            },
+        )
+
+        allowed = {f.name for f in dataclass_fields(GatingPolicyConfig)}
+        policy_raw = self.config.forecast_gating_policy or {}
+        policy_kwargs = {k: policy_raw[k] for k in policy_raw if k in allowed}
+        policy = GatingPolicyConfig(**policy_kwargs)
+
+        weights, confidence = compute_module_weights(inputs=g_inputs, config=policy)
+        top_modules = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+        return {
+            "timeframe": timeframe,
+            "run_reason": str(run_reason),
+            "computed_at": _now_iso(),
+            "source": "regime_snapshot",
+            "inputs": {
+                "regime_probs": regime_probs,
+                "spread_bps": float(g_inputs.spread_bps),
+                "depth_norm": float(g_inputs.depth_norm),
+                "lfi": float(g_inputs.lfi),
+                "jump_probability": float(g_inputs.jump_probability),
+                "event_window": bool(g_inputs.event_window),
+            },
+            "policy": {k: policy_kwargs[k] for k in sorted(policy_kwargs.keys())},
+            "weights": {k: float(v) for k, v in weights.items()},
+            "confidence": float(confidence),
+            "top_modules": [{"module": k, "weight": float(v)} for k, v in top_modules],
+        }
+
     def run_domain_job(
         self,
         spec: DomainSpec,
@@ -423,8 +564,14 @@ class SubprocessDomainJobRunner:
         runtime_cfg_dir = self.output_root / "runtime_configs"
         runtime_cfg_dir.mkdir(parents=True, exist_ok=True)
         exp_cfg_path = runtime_cfg_dir / f"experiment_{spec.timeframe}.yaml"
-        gating_meta = copy.deepcopy(state_snapshot.get("forecasting_gating", {}))
-        exp_cfg = self._build_domain_experiment_config(spec=spec, run_dir=run_dir, gating_meta=gating_meta)
+        gating_meta_prior = copy.deepcopy(state_snapshot.get("forecasting_gating", {}))
+        adaptive_overrides = sanitize_experiment_overrides(state_snapshot.get("adaptive_overrides") or {})
+        exp_cfg = self._build_domain_experiment_config(
+            spec=spec,
+            run_dir=run_dir,
+            gating_meta=gating_meta_prior,
+            adaptive_overrides=adaptive_overrides,
+        )
         with open(exp_cfg_path, "w", encoding="utf-8") as handle:
             yaml.safe_dump(exp_cfg, handle, sort_keys=False)
 
@@ -443,7 +590,9 @@ class SubprocessDomainJobRunner:
             "state_snapshot": state_snapshot,
             "fetch_n": int(spec.fetch_n),
             "run_every_bars": int(spec.run_every_bars),
-            "forecasting_gating": gating_meta,
+            "forecasting_gating_prior": gating_meta_prior,
+            "forecasting_gating": gating_meta_prior,
+            "adaptive_overrides": adaptive_overrides,
             "steps": [],
         }
 
@@ -454,6 +603,15 @@ class SubprocessDomainJobRunner:
         metadata["steps"].append({"name": "experiment", "return_code": rc, "ok": ok})
         if not ok:
             return False, metadata
+
+        # Replace prior gating with actual gating computed from the run's regime snapshot.
+        gating_actual = self._compute_forecasting_gating_from_regime_snapshot(
+            run_dir=run_dir,
+            timeframe=spec.timeframe,
+            run_reason=run_reason,
+        )
+        if gating_actual:
+            metadata["forecasting_gating"] = gating_actual
 
         predictions_path = run_dir / "predictions.parquet"
         if self.config.run_backtest and predictions_path.exists():
@@ -503,6 +661,34 @@ class SubprocessDomainJobRunner:
             metadata["steps"].append({"name": "improvement_loop", "return_code": rc_imp, "ok": ok_imp})
             if not ok_imp:
                 return False, metadata
+
+        # Post-run: LLM review (non-fatal) + bounded adaptive overrides for next run.
+        if bool(self.config.llm_review_enabled):
+            llm_step: dict[str, Any] = {"name": "llm_review"}
+            try:
+                review_cfg_path = (self.root_dir / self.config.llm_review_config).resolve()
+                reviewer = LLMResultsReviewer.from_yaml(review_cfg_path)
+                review, overrides = reviewer.review_run_dir(
+                    run_dir=run_dir,
+                    extra={
+                        "timeframe": spec.timeframe,
+                        "run_reason": run_reason,
+                    },
+                )
+                json_path, md_path = reviewer.write_review(run_dir=run_dir, review=review)
+                metadata["llm_review"] = {
+                    "ok": True,
+                    "verdict": review.get("verdict"),
+                    "headline": review.get("headline"),
+                    "json_path": str(json_path),
+                    "md_path": str(md_path),
+                    "config_overrides": overrides,
+                }
+                llm_step.update({"ok": True})
+            except Exception as exc:  # pylint: disable=broad-except
+                metadata["llm_review"] = {"ok": False, "error": str(exc)}
+                llm_step.update({"ok": False, "error": str(exc)})
+            metadata["steps"].append(llm_step)
 
         summary_path = run_dir / "domain_run_summary.json"
         with open(summary_path, "w", encoding="utf-8") as handle:
@@ -578,6 +764,7 @@ class ContinuousLearningSupervisor:
             d.setdefault("runs_total", 0)
             d.setdefault("bootstrap_done", False)
             d.setdefault("last_forecasting_gating", {})
+            d.setdefault("adaptive_overrides", {})
         return state
 
     def _save_state(self) -> None:
@@ -727,8 +914,17 @@ class ContinuousLearningSupervisor:
         dstate["last_trigger_ok"] = bool(ok)
         dstate["runs_total"] = int(dstate.get("runs_total", 0)) + 1
         dstate["bootstrap_done"] = True
-        if gating_meta:
-            dstate["last_forecasting_gating"] = copy.deepcopy(gating_meta)
+        meta_gating = (meta.get("forecasting_gating") or {}) if isinstance(meta, dict) else {}
+        if not meta_gating:
+            meta_gating = gating_meta
+        if meta_gating:
+            dstate["last_forecasting_gating"] = copy.deepcopy(meta_gating)
+
+        # Persist bounded adaptive overrides (learning) for next run if provided.
+        review = (meta.get("llm_review") or {}) if isinstance(meta, dict) else {}
+        suggested = sanitize_experiment_overrides(review.get("config_overrides") or {})
+        if suggested:
+            dstate["adaptive_overrides"] = copy.deepcopy(suggested)
         dstate["last_run_meta"] = meta
         if ok:
             dstate["bars_since_run"] = 0
