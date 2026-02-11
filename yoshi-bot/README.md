@@ -121,6 +121,19 @@ Per-domain run summaries now also include active forecasting module weights and
 confidence (from the modular taxonomy gating scaffold) in:
 - `reports/continuous/<timeframe>/<run_id>/domain_run_summary.json`
 
+The supervisor prefers **actual** regime probabilities when available:
+- `scripts/run_experiment.py` writes `regime_snapshot.json` (per-symbol, last-bar
+  regime distributions + derived gating inputs).
+- `SubprocessDomainJobRunner` computes `forecasting_gating` from that snapshot,
+  overriding any prior/default gating inputs.
+
+Optional (enabled by default in `configs/continuous_learning.yaml`):
+- `llm_review.json` / `llm_review.md` are written per run, and bounded adaptive
+  overrides are persisted into `supervisor_state.json` under:
+  - `domains.<timeframe>.adaptive_overrides`
+  These overrides are automatically deep-merged into the next run’s generated
+  runtime experiment config.
+
 #### Practical settings
 
 - Trigger cadence:
