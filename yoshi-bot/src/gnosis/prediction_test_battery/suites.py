@@ -66,6 +66,41 @@ def _get_arrays(context: BatteryContext) -> Tuple[np.ndarray, np.ndarray, np.nda
     return y_true, y_pred, y_prob
 
 
+class SchemaSanityTest(BaseTest):
+    """Fail-fast schema/time sanity checks (Suite 0)."""
+
+    def run(self, context: BatteryContext) -> TestResult:
+        df = context.artifact.predictions
+        if "timestamp" not in df.columns:
+            return self._fail({}, ["Missing required column: timestamp"])
+
+        ts = df["timestamp"]
+        n = int(len(ts))
+        n_missing = int(ts.isna().sum())
+        n_dupes = int(ts.duplicated().sum())
+        monotonic = bool(ts.is_monotonic_increasing)
+
+        stats = {
+            "n_rows": float(n),
+            "n_missing_timestamps": float(n_missing),
+            "n_duplicate_timestamps": float(n_dupes),
+            "is_monotonic_increasing": float(1.0 if monotonic else 0.0),
+        }
+
+        warnings: list[str] = []
+        if n_missing > 0:
+            warnings.append("Predictions contain NaT/NaN timestamps.")
+        if n_dupes > 0:
+            warnings.append("Predictions contain duplicate timestamps.")
+        if not monotonic:
+            warnings.append("Predictions timestamps are not monotonic increasing.")
+
+        if warnings:
+            # Fail fast: suite 0 is supposed to halt on fundamental data issues.
+            return self._fail(stats, warnings)
+        return self._pass(stats)
+
+
 def _window_indices(n: int, window: int) -> Iterable[np.ndarray]:
     for start in range(0, n, window):
         end = min(n, start + window)
@@ -626,7 +661,8 @@ class MissingnessRobustnessTest(BaseTest):
         mask = rng.random(len(y_true)) > 0.05
         y_pred_missing = y_pred.copy()
         y_pred_missing[~mask] = np.nan
-        y_pred_imputed = pd.Series(y_pred_missing).fillna(method="ffill").fillna(method="bfill").to_numpy()
+        # pandas >= 2.3 removed fillna(method=...); use dedicated helpers.
+        y_pred_imputed = pd.Series(y_pred_missing).ffill().bfill().to_numpy()
         rmse = np.sqrt(np.mean((y_true - y_pred_imputed) ** 2))
         return self._pass({"imputed_rmse": float(rmse)})
 
@@ -757,6 +793,7 @@ class AdverseSelectionProxyTest(BaseTest):
 
 SUITE_TESTS: Dict[str, List[BaseTest]] = {
     "0": [
+        SchemaSanityTest("0.0 Schema sanity", "Predictions schema + timestamp sanity"),
         CausalityTest("0.1 Causality check", "Feature causality validation"),
         SplitIntegrityTest("0.2 Split integrity", "Split and embargo validation"),
         LabelAlignmentTest("0.3 Label alignment", "Label alignment with timestamps"),
