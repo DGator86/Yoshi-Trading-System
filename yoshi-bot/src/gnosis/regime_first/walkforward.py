@@ -15,6 +15,7 @@ from gnosis.regime_first.playbooks import add_playbook_outputs
 from gnosis.regime_first.reporting import (
     js_divergence,
     metrics_by_group,
+    playbook_confusion_matrix,
     regime_distribution,
     regime_robustness_score,
     tail_intensity_stats,
@@ -153,6 +154,7 @@ def run_regime_first_walkforward(
         by_playbook = metrics_by_group(trades, "playbook_id")
         by_transition_entry = metrics_by_group(trades, "transition_entry") if "transition_entry" in trades.columns else {}
         rrs = regime_robustness_score(trades)
+        confusion = playbook_confusion_matrix(trades)
 
         # Cost stress tests: rerun with multipliers.
         stress_results = []
@@ -187,6 +189,7 @@ def run_regime_first_walkforward(
                 "overall": bt.stats,
                 "by_regime": by_regime,
                 "by_playbook": by_playbook,
+                "playbook_confusion": confusion,
                 "by_transition_entry": by_transition_entry,
                 "rrs": rrs,
                 "cost_stress_tests": stress_results,

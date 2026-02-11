@@ -92,6 +92,8 @@ def metrics_by_group(trades: pd.DataFrame, group_col: str) -> dict[str, Any]:
         gg = g.copy()
         n = int(len(gg))
         pnl = pd.to_numeric(gg.get("pnl_net", 0.0), errors="coerce").fillna(0.0)
+        ret = pd.to_numeric(gg.get("ret_net", 0.0), errors="coerce").fillna(0.0)
+        hold = pd.to_numeric(gg.get("hold_minutes", 0.0), errors="coerce").fillna(0.0)
         fees = pd.to_numeric(gg.get("fees", 0.0), errors="coerce").fillna(0.0)
         slip = pd.to_numeric(gg.get("slippage_cost", 0.0), errors="coerce").fillna(0.0)
         spread = pd.to_numeric(gg.get("spread_cost", 0.0), errors="coerce").fillna(0.0)
@@ -99,12 +101,34 @@ def metrics_by_group(trades: pd.DataFrame, group_col: str) -> dict[str, Any]:
             "n_trades": n,
             "pnl_net_sum": float(pnl.sum()),
             "pnl_net_mean": float(pnl.mean() if n else 0.0),
+            "ret_net_mean": float(ret.mean() if n else 0.0),
             "win_rate": float((pnl > 0).mean() if n else 0.0),
+            "hold_minutes_mean": float(hold.mean() if n else 0.0),
             "fees_sum": float(fees.sum()),
             "slippage_sum": float(slip.sum()),
             "spread_sum": float(spread.sum()),
         }
     return out
+
+
+def playbook_confusion_matrix(trades: pd.DataFrame) -> dict[str, Any]:
+    """Confusion matrix: playbook_id vs regime_entry_label."""
+    if trades.empty:
+        return {"counts": {}, "row_norm": {}}
+    if "playbook_id" not in trades.columns or "regime_entry_label" not in trades.columns:
+        return {"counts": {}, "row_norm": {}}
+
+    cm = pd.crosstab(
+        trades["regime_entry_label"].astype(str),
+        trades["playbook_id"].astype(str),
+        dropna=False,
+    )
+    counts = {r: {c: int(cm.loc[r, c]) for c in cm.columns} for r in cm.index}
+    row_norm = {}
+    for r in cm.index:
+        s = float(cm.loc[r].sum())
+        row_norm[r] = {c: float(cm.loc[r, c] / s) if s > 0 else 0.0 for c in cm.columns}
+    return {"counts": counts, "row_norm": row_norm}
 
 
 def regime_robustness_score(trades: pd.DataFrame) -> dict[str, Any]:
