@@ -1,0 +1,12 @@
+Build a crypto prediction engine for BTC/ETH/SOL using print-first quantized
+time (notional trade buckets). Implement FeatureSignature from prints + L2 +
+perp OI/funding + liquidation intensity + BTC coupling. Implement Hilbert
+regime probability projection (5 regimes) with template fitting, entropy
+overlay, Order posterior (5 constraints), Node posterior (25), age tracking,
+and a semi-Markov duration-aware transition model (power-law survival + exit
+matrix). Produce walkforward forward regime probabilities and a forward
+collapse-location quantile fan (q05/q50/q95) using per-node Student-t return
+models with Hurst (GHE) scaling. Output JSON overlay payload for historical
+shading and forward projections. Use the module layout and function signatures
+provided; prioritize correctness and determinism; candles are derived only for
+visualization.

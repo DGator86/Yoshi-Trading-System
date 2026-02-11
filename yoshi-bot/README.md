@@ -128,6 +128,25 @@ RSI, Ichimoku, funding, OI, liquidations, and CVD, see:
 
 - [docs/crypto-strengthened-approach.md](docs/crypto-strengthened-approach.md)
 
+## Crypto RFP HSO Developer Handoff Assets
+
+Canonical handoff assets for the Regime Field Probability Hilbert Space Overlay
+and walkforward collapse projection stack are now versioned in-repo:
+
+- Full developer spec:
+  - [docs/crypto-rfp-hso-developer-spec.md](docs/crypto-rfp-hso-developer-spec.md)
+- Gemini prompt artifact:
+  - [docs/crypto-rfp-hso-gemini-prompt.txt](docs/crypto-rfp-hso-gemini-prompt.txt)
+- Canonical defaults/constants YAML:
+  - [configs/crypto_rfp_hso.yaml](configs/crypto_rfp_hso.yaml)
+
+The YAML includes:
+- default runtime config values (bucketing, event-time, horizons, hazard controls)
+- `VALID_MASK`
+- regime-method gating matrix `G`
+- `ORDER_METHOD_MULT`
+- event alphabet used for explicit event-time semantics.
+
 ## Required Outputs (per run)
 - data/manifests/data_manifest.json
 - reports/latest/report.json
