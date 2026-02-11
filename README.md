@@ -120,6 +120,7 @@ Located in `/clawdbot`, this handles user interaction and deployment.
 | **`kalshi_scanner.py`** | **The Eyes.** Fetches market data, runs the physics engine, and spots "Value Plays". |
 | **`run_experiment.py`** | **The Lab.** Runs backtests to validate if the physics model is actually working. |
 | **`run_improvement_loop.py`** | **The Coach.** Ralph uses this to tune hyperparameters automatically over time. |
+| **`run_regime_first_walkforward.py`** | **Regime-first WF.** Builds a 1m regime ledger (MR/TR/CP/EX/LQ) and runs regime-aware walk-forward with trade attribution + distribution-shift flags. |
 
 ### In `clawdbot/scripts/` (The Hands)
 
