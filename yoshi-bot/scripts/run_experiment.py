@@ -10,6 +10,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Load local secrets from yoshi-bot/.env if present.
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    _env_path = Path(__file__).resolve().parents[1] / ".env"
+    if _env_path.exists():
+        load_dotenv(dotenv_path=_env_path, override=False)
+except ImportError:
+    pass
+
 import yaml
 import pandas as pd
 import numpy as np
@@ -89,6 +99,119 @@ def compute_report_hash(report: dict) -> str:
     return hashlib.sha256(report_json.encode()).hexdigest()
 
 
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return float(max(lo, min(hi, x)))
+
+
+def _sigmoid(x: float) -> float:
+    import math
+
+    # Stable sigmoid for moderate x.
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
+def build_regime_snapshot(features_df: pd.DataFrame) -> dict:
+    """Build a compact, per-symbol regime probability snapshot for audits/gating.
+
+    This intentionally uses only same-bar information (no future labels).
+    """
+    out: dict = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "symbols": {},
+    }
+    if features_df is None or len(features_df) == 0:
+        return out
+
+    df = features_df.copy()
+    if "symbol" not in df.columns:
+        return out
+
+    for sym in sorted(df["symbol"].unique().tolist()):
+        sdf = df[df["symbol"] == sym].copy()
+        if sdf.empty:
+            continue
+        if "bar_idx" in sdf.columns:
+            sdf = sdf.sort_values("bar_idx")
+        else:
+            sdf = sdf.sort_values("timestamp_end") if "timestamp_end" in sdf.columns else sdf
+        row = sdf.iloc[-1]
+
+        # Extract per-level distributions when present.
+        levels = {}
+        for lvl in ["K", "P", "C", "O", "F", "G", "S"]:
+            probs = {}
+            prefix = f"{lvl}_prob_"
+            for c in sdf.columns:
+                if c.startswith(prefix):
+                    probs[c[len(prefix):]] = float(row.get(c, 0.0))
+            levels[lvl] = {
+                "label": str(row.get(f"{lvl}_label", row.get(lvl, "UNKNOWN"))),
+                "pmax": float(row.get(f"{lvl}_pmax", 0.0)),
+                "entropy": float(row.get(f"{lvl}_entropy", 0.0)),
+                "probs": probs,
+            }
+
+        realized_vol = float(row.get("realized_vol", 0.0))
+        returns = float(row.get("returns", 0.0))
+        ofi = float(row.get("ofi", 0.0))
+
+        med_vol = float(sdf["realized_vol"].median()) if "realized_vol" in sdf.columns else realized_vol
+        med_vol = max(med_vol, 1e-9)
+        vol_regime = realized_vol / med_vol if med_vol > 0 else 1.0
+
+        # Derive lightweight gating inputs from actual KPCOFGS probabilities.
+        p_trending = float(row.get("K_prob_K_TRENDING", 0.0))
+        p_vol_exp = float(row.get("P_prob_P_VOL_EXPANDING", 0.0))
+        p_range = float(row.get("O_prob_O_RANGE", 0.0))
+
+        p_buy = float(row.get("C_prob_C_BUY_FLOW_DOMINANT", 0.0)) + 0.5 * float(row.get("C_prob_C_FLOW_NEUTRAL", 0.0))
+        p_sell = float(row.get("C_prob_C_SELL_FLOW_DOMINANT", 0.0)) + 0.5 * float(row.get("C_prob_C_FLOW_NEUTRAL", 0.0))
+
+        spread_bps = _clamp(10000.0 * realized_vol * 0.5, 0.0, 250.0)
+        depth_norm = _clamp(1.0 / (1.0 + spread_bps / 25.0), 0.05, 1.0)
+        lfi = _clamp(max(vol_regime - 1.0, 0.0), 0.0, 5.0)
+
+        z_jump = abs(returns) / max(realized_vol, 1e-9)
+        jump_probability = _clamp(_sigmoid((z_jump - 2.5) * 1.2), 0.0, 1.0)
+
+        gating_inputs = {
+            "regime_probs": {
+                "trend_up": max(p_trending * p_buy, 0.0),
+                "trend_down": max(p_trending * p_sell, 0.0),
+                "range": max(p_range, 0.0),
+                "volatility_expansion": max(p_vol_exp, 0.0),
+                "cascade_risk": max(p_vol_exp * min(1.0, abs(ofi) / 0.5), 0.0),
+            },
+            "spread_bps": float(spread_bps),
+            "depth_norm": float(depth_norm),
+            "lfi": float(lfi),
+            "jump_probability": float(jump_probability),
+            "event_window": False,
+        }
+
+        out["symbols"][sym] = {
+            "bar_idx": int(row.get("bar_idx", -1)) if "bar_idx" in sdf.columns else -1,
+            "timestamp_end": str(row.get("timestamp_end", "")),
+            "levels": levels,
+            "features": {
+                "returns": float(returns),
+                "realized_vol": float(realized_vol),
+                "ofi": float(ofi),
+                "range_pct": float(row.get("range_pct", 0.0)),
+                "regime_entropy": float(row.get("regime_entropy", 0.0)),
+                "vol_regime": float(row.get("vol_regime", vol_regime)),
+            },
+            "gating_inputs": gating_inputs,
+        }
+
+    return out
+
+
 def load_config(config_path: str) -> dict:
     """Load experiment configuration from YAML."""
     with open(config_path) as f:
@@ -134,7 +257,20 @@ def apply_abstain_logic(
 
     # Get S_label and S_pmax from features for matching rows
     s_info = features_df[["symbol", "bar_idx", "S_label", "S_pmax"]].copy()
-    result = result.merge(s_info, on=["symbol", "bar_idx"], how="left")
+    # If predictions already carry S_* (passthrough), keep them and only fill gaps.
+    result = result.merge(s_info, on=["symbol", "bar_idx"], how="left", suffixes=("", "_feat"))
+    if "S_label_feat" in result.columns:
+        if "S_label" not in result.columns:
+            result["S_label"] = result["S_label_feat"]
+        else:
+            result["S_label"] = result["S_label"].fillna(result["S_label_feat"])
+        result = result.drop(columns=["S_label_feat"], errors="ignore")
+    if "S_pmax_feat" in result.columns:
+        if "S_pmax" not in result.columns:
+            result["S_pmax"] = result["S_pmax_feat"]
+        else:
+            result["S_pmax"] = result["S_pmax"].fillna(result["S_pmax_feat"])
+        result = result.drop(columns=["S_pmax_feat"], errors="ignore")
 
     # Get default confidence floor from config
     constraints = regimes_config.get("constraints_by_species", {})
@@ -226,6 +362,15 @@ def run_experiment(
     # 7. Compute future returns (target)
     print("Computing targets...")
     features_df = compute_future_returns(features_df, horizon_bars=10)
+
+    # Persist a compact regime probability snapshot for downstream gating/review.
+    try:
+        snapshot = build_regime_snapshot(features_df)
+        with open(out_dir / "regime_snapshot.json", "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2, sort_keys=True)
+    except Exception:
+        # Never fail the run for audit snapshot generation.
+        pass
 
     # 8. Ralph Loop (optional): nested hyperparameter selection
     ralph_results = None
@@ -564,9 +709,11 @@ def run_experiment(
                 else:
                     predictions_df[col] = 0.0
 
-        # Select columns in order
-        available_cols = [c for c in required_cols if c in predictions_df.columns]
-        predictions_df = predictions_df[available_cols]
+        # Select required columns in order, but keep any extra diagnostic columns
+        # (e.g., regime probability columns) for auditing and learning.
+        required_present = [c for c in required_cols if c in predictions_df.columns]
+        extra_cols = sorted([c for c in predictions_df.columns if c not in set(required_present)])
+        predictions_df = predictions_df[required_present + extra_cols]
         # Ensure predictions artifact is self-contained: attach future_return (y_true)
         try:
             import yaml

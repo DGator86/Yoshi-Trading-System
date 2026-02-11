@@ -1,11 +1,19 @@
 import subprocess
 import json
+import os
 
-tokens = [
-    '8501633363:AAHaBepg65Uu-pKjZhFD1zOuiHV_zypGVQY', # The one in get_tg_updates.py
-    '8567967677:AAE9LFfLwPfVXqxU2n19TY-aWRbZflGCpEs', # The one in .env
-]
-vps_ip = "165.245.140.115"
+raw_tokens = os.getenv("TELEGRAM_BOT_TOKENS", "")
+tokens = [tok.strip() for tok in raw_tokens.split(",") if tok.strip()]
+if not tokens:
+    single = os.getenv("TELEGRAM_BOT_TOKEN")
+    if single:
+        tokens = [single]
+
+vps_ip = os.getenv("VPS_IP")
+if not vps_ip:
+    raise SystemExit("VPS_IP is not set.")
+if not tokens:
+    raise SystemExit("Set TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKENS.")
 
 for token in tokens:
     print(f"\nChecking Token: {token}")

@@ -1,0 +1,16 @@
+[Unit]
+Description=Yoshi Crypto Source Scanner
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/Yoshi-Trading-System
+ExecStart=/usr/bin/python3 yoshi-bot/scripts/run_crypto_source_scanner.py --config yoshi-bot/configs/crypto_source_scanner.yaml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONPATH=/root/Yoshi-Trading-System"
+
+[Install]
+WantedBy=multi-user.target

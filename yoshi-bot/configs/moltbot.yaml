@@ -1,8 +1,9 @@
 ai:
-  provider: openrouter
-  model: anthropic/claude-3.5-sonnet
-  api_key_env: OPENROUTER_API_KEY
-  endpoint: https://openrouter.ai/api/v1/chat/completions
+  provider: ollama
+  # Pick a model you have pulled locally, e.g.:
+  #   ollama pull llama3.1
+  model: llama3.1
+  endpoint: http://localhost:11434/api/chat
   timeout_seconds: 30
   system_prompt: >
     You are Moltbot, a trading assistant. Use the forecast data and

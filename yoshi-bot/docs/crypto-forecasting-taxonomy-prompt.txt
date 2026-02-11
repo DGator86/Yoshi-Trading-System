@@ -1,0 +1,25 @@
+You are integrating a crypto forecasting system. Implement a modular ensemble
+that includes 12 paradigms:
+1. Technical feature generators (trend, mean reversion, vol regime, volume confirmation)
+2. Classical stats (volatility/state-space/regime switching)
+3. Macro/cross-asset factor residualization
+4. Derivatives positioning module producing a Leverage Fragility Index (LFI) + tail risk
+5. Microstructure/order flow module (OFI, trade imbalance, liquidity slope)
+6. On-chain slow priors (cycle/risk context, not hourly timing)
+7. Sentiment/attention modulators (extremes/reflexivity)
+8. Tabular ML meta-learner over all features with strict walk-forward validation
+9. Deep sequence model as distribution predictor (quantiles, not point price)
+10. Regime state machine producing regime probabilities and gating weights
+11. Scenario/Monte Carlo envelope generator using regime-conditioned vol + jumps
+12. Optional crowd/binary market implied priors for barrier probability sanity checks
+
+Hard requirements:
+- Define prediction targets explicitly: returns, direction, quantiles, volatility, jump probability, regime.
+- For each module: specify inputs, features, output type, conditions where it is trusted, and failure modes.
+- Implement a gating policy that outputs module weights and a confidence scalar used to widen/narrow forecast distributions.
+- Evaluate with walk-forward only; report calibration, quantile loss, Brier scores for tails, and per-regime metrics.
+
+Output deliverables:
+- A spec sheet (module interfaces + schemas)
+- A regime taxonomy and gating rules
+- An evaluation protocol and metrics list

@@ -1,21 +1,30 @@
-# ClawdBot-V1: Antigravity-Claude Integration
+# ClawdBot-V1 / Ollama: AI Audit Layer Integration
 
 This document defines the integration of **ClawdBot-V1** (Claude 3.5 Sonnet) into the **Antigravity** (Yoshi-Bot) ecosystem.
 
 ## Overview
 
-ClawdBot-V1 serves as the primary reasoning engine for Yoshi-Bot. It acts as the "Audit Layer" that reviews mathematical forecasts from the Price-Time Manifold and generates actionable trade plans.
+This repo supports an AI "Audit Layer" that reviews model forecasts and produces
+an actionable trade plan JSON.
+
+You can run this layer via:
+- OpenRouter + Claude (ClawdBot-V1)
+- Ollama (local LLM)
 
 ## Integration Architecture
 
-1. **AI Client**: Implemented as `OpenRouterClient` in `src/gnosis/execution/moltbot.py`.
-2. **Provider**: OpenRouter (Model: `anthropic/claude-3.5-sonnet`).
-3. **Configuration**: Managed via `configs/moltbot.yaml`.
-4. **Environment**: Secured via `OPENROUTER_API_KEY` in `.env`.
+1. **AI Client**: implemented in `src/gnosis/execution/moltbot.py`
+2. **Providers**:
+   - `openrouter` / `clawdbot` (OpenRouter)
+   - `ollama` (local)
+3. **Configuration**: `configs/moltbot.yaml`
+4. **Environment**:
+   - OpenRouter: `OPENROUTER_API_KEY`
+   - Ollama: no API key required (local endpoint)
 
 ## Functional Roles
 
-- **Forecast Auditing**: Validating the physics engine signals.
+- **Forecast Auditing**: sanity-check forecasts and regimes.
 - **Risk Management**: Checking trades against `max_position` and `leverage` limits.
 - **Natural Language Reporting**: Generating the "Action" strings for Telegram alerts.
 

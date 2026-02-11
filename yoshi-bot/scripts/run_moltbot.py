@@ -13,6 +13,16 @@ import json
 import sys
 from pathlib import Path
 
+# Load local secrets from yoshi-bot/.env if present.
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    _env_path = Path(__file__).resolve().parents[1] / ".env"
+    if _env_path.exists():
+        load_dotenv(dotenv_path=_env_path, override=False)
+except ImportError:
+    pass
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from gnosis.execution import MoltbotOrchestrator, load_moltbot_config

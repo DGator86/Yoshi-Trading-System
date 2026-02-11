@@ -11,9 +11,13 @@ import requests  # type: ignore
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv  # type: ignore
 
-load_dotenv()
+    load_dotenv()
+except ImportError:
+    # dotenv is optional; environment variables may be provided by systemd/CI.
+    pass
 
 
 class KalshiClient:

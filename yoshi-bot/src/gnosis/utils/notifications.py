@@ -1,10 +1,17 @@
 import os
 import asyncio
-import aiohttp
 from typing import Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+try:
+    import aiohttp  # type: ignore
+except ImportError:  # pragma: no cover
+    aiohttp = None
+
+import requests
+
 
 class TelegramNotifier:
     """Utility to send alerts to Telegram."""
@@ -27,16 +34,26 @@ class TelegramNotifier:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, json=payload) as response:
-                    if response.status == 200:
-                        return True
-                    else:
+            if aiohttp is not None:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(self.api_url, json=payload) as response:
+                        if response.status == 200:
+                            return True
                         resp_text = await response.text()
-                        logger.error(f"Telegram API Error: {response.status} - {resp_text}")
+                        logger.error("Telegram API Error: %s - %s", response.status, resp_text)
                         return False
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+
+            # Fallback: use requests in a worker thread (no aiohttp dependency).
+            def _post():
+                return requests.post(self.api_url, json=payload, timeout=20)
+
+            resp = await asyncio.to_thread(_post)
+            if resp.status_code == 200:
+                return True
+            logger.error("Telegram API Error: %s - %s", resp.status_code, resp.text)
+            return False
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Failed to send Telegram message: %s", exc)
             return False
 
 def send_telegram_alert_sync(text: str):

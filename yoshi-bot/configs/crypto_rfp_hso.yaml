@@ -1,0 +1,130 @@
+# Canonical crypto_rfp_hso handoff configuration artifact.
+# This file mirrors code-level defaults/constants for easier external agent use.
+
+crypto_rfp_hso:
+  defaults:
+    symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+    bucket_mode: NOTIONAL
+    bucket_notional:
+      BTCUSDT: 5000000
+      ETHUSDT: 2000000
+      SOLUSDT: 500000
+    ewma_mu_window: 200
+    ewma_sigma_window: 200
+    hurst_window: 1500
+    hurst_horizons: [1, 2, 4, 8, 16, 32]
+    regime_temperature: 6.0
+    order_temperature: 5.0
+    tau_min_duration: 5
+    forward_horizons: [1, 2, 4, 8, 16, 32]
+    fan_quantiles: [0.05, 0.5, 0.95]
+    entropy_epsilon: 1.0e-9
+
+    # Event-time controls.
+    tau_mode: canonical
+    tau_beta: 0.6
+    tau_gamma: 0.4
+    tau_delta: 0.4
+    tau_w_min: 0.25
+    tau_w_max: 4.0
+
+    # Feature and transition controls.
+    impact_notional_usd: 100000.0
+    shock_gap_sigma_mult: 4.0
+    h_min: 0.01
+    h_max: 0.99
+    base_alpha: 0.7
+
+    # Event-time diffusion temperature controls.
+    theta_alpha_f: 1.0
+    theta_beta_l: 1.0
+
+    # Hazard surface controls.
+    hazard_grid_size: 121
+    hazard_band_mult: 3.0
+
+  event_alphabet:
+    - trade
+    - book
+    - funding_update
+    - liq_print
+    - onchain_pulse
+    - dex_swap
+    - mev_bundle
+
+  valid_mask:
+    Balanced:
+      Liquidity-Contained: 1
+      Liquidity-Release: 1
+      Positioning-Constraint: 1
+      Information-Override: 1
+      Correlation-Driven: 1
+    Discovery:
+      Liquidity-Contained: 1
+      Liquidity-Release: 1
+      Positioning-Constraint: 1
+      Information-Override: 1
+      Correlation-Driven: 1
+    Pinning:
+      Liquidity-Contained: 1
+      Liquidity-Release: 1
+      Positioning-Constraint: 1
+      Information-Override: 1
+      Correlation-Driven: 1
+    Shock:
+      Liquidity-Contained: 0
+      Liquidity-Release: 1
+      Positioning-Constraint: 1
+      Information-Override: 1
+      Correlation-Driven: 1
+    Transitional:
+      Liquidity-Contained: 1
+      Liquidity-Release: 1
+      Positioning-Constraint: 1
+      Information-Override: 0
+      Correlation-Driven: 1
+
+  method_gating:
+    G:
+      Balanced:
+        analytic_local: 0.55
+        semi_markov_mixture: 0.40
+        quantile_coverage: 0.10
+        pde_density: 0.05
+      Discovery:
+        analytic_local: 0.20
+        semi_markov_mixture: 0.55
+        quantile_coverage: 0.25
+        pde_density: 0.05
+      Pinning:
+        analytic_local: 0.50
+        semi_markov_mixture: 0.45
+        quantile_coverage: 0.10
+        pde_density: 0.05
+      Shock:
+        analytic_local: 0.05
+        semi_markov_mixture: 0.45
+        quantile_coverage: 0.60
+        pde_density: 0.10
+      Transitional:
+        analytic_local: 0.10
+        semi_markov_mixture: 0.35
+        quantile_coverage: 0.60
+        pde_density: 0.05
+
+    order_method_mult:
+      Correlation-Driven:
+        analytic_local: 0.60
+        semi_markov_mixture: 1.15
+        quantile_coverage: 1.20
+        pde_density: 1.00
+      Positioning-Constraint:
+        analytic_local: 0.90
+        semi_markov_mixture: 1.20
+        quantile_coverage: 1.05
+        pde_density: 1.00
+      Information-Override:
+        analytic_local: 0.40
+        semi_markov_mixture: 1.10
+        quantile_coverage: 1.40
+        pde_density: 1.10

@@ -15,6 +15,21 @@ from urllib import request
 import yaml
 
 
+def _parse_json_response(content: str) -> Dict[str, Any]:
+    """Parse JSON from an LLM response string.
+
+    Some models may wrap JSON in extra text; we attempt a basic extraction.
+    """
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        if "{" in content and "}" in content:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            return json.loads(content[start:end])
+        raise
+
+
 @dataclass
 class AIProviderConfig:
     """Configuration for the AI provider."""
@@ -117,7 +132,7 @@ class OpenAIChatClient(AIClient):
         with request.urlopen(req, timeout=self.config.timeout_seconds) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         content = data["choices"][0]["message"]["content"]
-        return json.loads(content)
+        return _parse_json_response(content)
 
 
 class OpenRouterClient(AIClient):
@@ -167,16 +182,46 @@ class OpenRouterClient(AIClient):
             raise RuntimeError(f"OpenRouter Error: {json.dumps(data)}")
 
         content = data["choices"][0]["message"]["content"]
-        # Try to parse JSON from the response
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            # If the model returned text around the JSON, try a basic extract
-            if "{" in content and "}" in content:
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                return json.loads(content[start:end])
-            raise
+        return _parse_json_response(content)
+
+
+class OllamaClient(AIClient):
+    """Ollama client using the native /api/chat endpoint."""
+
+    def __init__(self, config: AIProviderConfig):
+        self.config = config
+
+    def generate_plan(self, prompt: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        # Ollama uses local endpoints and typically requires no API key.
+        payload: Dict[str, Any] = {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": self.config.system_prompt},
+                {"role": "user", "content": prompt},
+                {"role": "user", "content": json.dumps(context)},
+            ],
+            "stream": False,
+            # Ask Ollama to enforce valid JSON output when supported.
+            "format": "json",
+        }
+        body = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            self.config.endpoint,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=self.config.timeout_seconds) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        # /api/chat returns {message: {content: "..."}}
+        content = (data.get("message") or {}).get("content")
+        if not content:
+            # Fallbacks for alternative Ollama routes or unexpected wrappers.
+            content = data.get("response")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError(f"Ollama response missing content: {json.dumps(data)}")
+        return _parse_json_response(content)
 
 
 class StubAIClient(AIClient):
@@ -238,6 +283,8 @@ class MoltbotOrchestrator:
             return OpenAIChatClient(self.config.ai)
         if provider in ("openrouter", "clawdbot"):
             return OpenRouterClient(self.config.ai)
+        if provider == "ollama":
+            return OllamaClient(self.config.ai)
         return StubAIClient()
 
     def _load_services(self) -> List[ServiceAdapter]:

@@ -1,0 +1,16 @@
+[Unit]
+Description=Yoshi Continuous Learning Supervisor
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/Yoshi-Trading-System
+ExecStart=/usr/bin/python3 yoshi-bot/scripts/run_continuous_learning.py --config yoshi-bot/configs/continuous_learning.yaml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONPATH=/root/Yoshi-Trading-System"
+
+[Install]
+WantedBy=multi-user.target

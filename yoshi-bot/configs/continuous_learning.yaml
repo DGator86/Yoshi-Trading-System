@@ -1,0 +1,101 @@
+# Always-on machine learning + optimization supervisor.
+# Runs on each relative quantized timeframe close (run_every_bars),
+# while fetch_n defines the rolling backtest timeline units.
+continuous_learning:
+  symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+  exchange: kraken
+  check_interval_sec: 5
+  bootstrap_run: true
+  run_backtest: true
+  run_extra_improvement_loop: false
+
+  output_root: reports/continuous
+  state_path: reports/continuous/supervisor_state.json
+  lock_path: reports/continuous/supervisor.lock
+  root_dir: .
+
+  base_experiment_config: configs/experiment.yaml
+  hparams_config: configs/hparams.yaml
+  backtest_config: configs/backtest.yaml
+
+  experiment_script: scripts/run_experiment.py
+  backtest_script: scripts/run_backtest.py
+  improvement_script: scripts/run_improvement_loop.py
+
+  ccxt_rate_limit_ms: 300
+  ccxt_sandbox: false
+
+  # Metadata-only module-gating context logged per domain run.
+  # These values do not execute trades directly; they annotate run summaries
+  # with active module weights/confidence for monitoring and analysis.
+  forecast_gating_enabled: true
+  forecast_gating_defaults:
+    regime_probs:
+      trend_up: 0.20
+      trend_down: 0.20
+      range: 0.40
+      cascade_risk: 0.10
+      volatility_expansion: 0.10
+    spread_bps: 6.0
+    depth_norm: 0.80
+    lfi: 0.40
+    jump_probability: 0.08
+    event_window: false
+  forecast_gating_policy:
+    cascade_prob_threshold: 0.30
+    jump_high_threshold: 0.20
+    lfi_high_threshold: 1.0
+
+  # Post-run automated review + bounded adaptive overrides (learning).
+  # If Ollama is not running, the supervisor will record a warning and continue.
+  llm_review_enabled: true
+  llm_review_config: configs/llm_review.yaml
+
+  # n=2000 is the rolling fetch/backtest window, not the trigger cadence.
+  domains:
+    - timeframe: 1m
+      fetch_n: 2000
+      run_every_bars: 1
+      forecast_horizon_bars: 1
+      min_wall_interval_sec: 0
+      enabled: true
+    - timeframe: 5m
+      fetch_n: 2000
+      run_every_bars: 1
+      forecast_horizon_bars: 1
+      min_wall_interval_sec: 0
+      enabled: true
+      forecast_gating_inputs:
+        # Example domain override: slightly more cautious 5m fragility prior.
+        lfi: 0.55
+        jump_probability: 0.10
+    - timeframe: 15m
+      fetch_n: 2000
+      run_every_bars: 1
+      forecast_horizon_bars: 1
+      min_wall_interval_sec: 0
+      enabled: true
+    - timeframe: 30m
+      fetch_n: 2000
+      run_every_bars: 1
+      forecast_horizon_bars: 1
+      min_wall_interval_sec: 0
+      enabled: true
+    - timeframe: 1h
+      fetch_n: 2000
+      run_every_bars: 1
+      forecast_horizon_bars: 1
+      min_wall_interval_sec: 0
+      enabled: true
+    - timeframe: 4h
+      fetch_n: 2000
+      run_every_bars: 1
+      forecast_horizon_bars: 1
+      min_wall_interval_sec: 0
+      enabled: true
+    - timeframe: 1d
+      fetch_n: 2000
+      run_every_bars: 1
+      forecast_horizon_bars: 1
+      min_wall_interval_sec: 0
+      enabled: true

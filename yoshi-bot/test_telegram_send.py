@@ -1,10 +1,18 @@
 import subprocess
 import json
+import os
 
-token = '8567967677:AAE9LFfLwPfVXqxU2n19TY-aWRbZflGCpEs'
-chat_id = '8236163940'
-vps_ip = "165.245.140.115"
+token = os.getenv("TELEGRAM_BOT_TOKEN")
+chat_id = os.getenv("TELEGRAM_CHAT_ID")
+vps_ip = os.getenv("VPS_IP")
 ssh_opts = "-o BatchMode=yes -o ConnectTimeout=10"
+
+if not token:
+    raise SystemExit("TELEGRAM_BOT_TOKEN is not set.")
+if not chat_id:
+    raise SystemExit("TELEGRAM_CHAT_ID is not set.")
+if not vps_ip:
+    raise SystemExit("VPS_IP is not set.")
 
 def run_remote_curl(endpoint, data=None):
     url = f"https://api.telegram.org/bot{token}/{endpoint}"
