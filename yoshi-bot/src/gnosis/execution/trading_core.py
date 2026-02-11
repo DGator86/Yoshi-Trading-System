@@ -72,7 +72,24 @@ class TradingState:
 
 
 state = TradingState()
-kalshi = KalshiClient()
+# Kalshi credentials may be absent in dev/CI; don't fail import-time.
+_KALSHI: Optional[KalshiClient] = None
+_KALSHI_INIT_ERROR: Optional[str] = None
+
+
+def _get_kalshi() -> KalshiClient:
+    global _KALSHI, _KALSHI_INIT_ERROR  # pylint: disable=global-statement
+
+    if _KALSHI is not None:
+        return _KALSHI
+    if _KALSHI_INIT_ERROR is not None:
+        raise RuntimeError(_KALSHI_INIT_ERROR)
+    try:
+        _KALSHI = KalshiClient()
+        return _KALSHI
+    except Exception as exc:  # pylint: disable=broad-except
+        _KALSHI_INIT_ERROR = f"KalshiClient init failed: {exc}"
+        raise RuntimeError(_KALSHI_INIT_ERROR) from exc
 
 
 def on_breaker_trip(failure_count: int):
@@ -138,22 +155,34 @@ async def propose_trade(proposal: TradeProposal) -> Dict[str, Any]:
     if not state.is_active:
         return {"success": False, "message": "Trading Core is paused."}
 
-    prop_id = str(uuid.uuid4())[:8]
-    if not proposal.proposal_id:
-        proposal.proposal_id = prop_id
-    
-    state.proposals[prop_id] = proposal.dict()
-    logger.info("Received proposal %s for %s (%s)", prop_id, proposal.symbol, proposal.action)
+    proposal_id = (proposal.proposal_id or "").strip()
+    if not proposal_id:
+        proposal_id = str(uuid.uuid4())[:12]
+        proposal.proposal_id = proposal_id
+
+    # Idempotency: allow safe retries from bridges/outboxes without double-exec.
+    if proposal_id in state.proposals:
+        msg = f"Duplicate proposal_id {proposal_id} received; ignoring duplicate."
+        logger.info(msg)
+        return {"success": True, "message": msg, "data": state.proposals[proposal_id]}
+
+    state.proposals[proposal_id] = proposal.dict()
+    logger.info(
+        "Received proposal %s for %s (%s)",
+        proposal_id,
+        proposal.symbol,
+        proposal.action,
+    )
 
     # 1. Validation
     if not proposal.ticker:
-        msg = f"Proposal {prop_id} has no ticker. Cannot execute."
+        msg = f"Proposal {proposal_id} has no ticker. Cannot execute."
         logger.warning(msg)
         return {"success": False, "message": msg}
 
     if abs(proposal.edge) < 0.05:
         # Just log, don't execute if edge is too small (already filtered by scanner though)
-        msg = f"Proposal {prop_id} edge too small ({proposal.edge:.1%}). Skipping execution."
+        msg = f"Proposal {proposal_id} edge too small ({proposal.edge:.1%}). Skipping execution."
         logger.info(msg)
         return {"success": True, "message": msg}
 
@@ -174,12 +203,13 @@ async def propose_trade(proposal: TradeProposal) -> Dict[str, Any]:
         
         # Define the sync call to wrap
         def call_kalshi():
+            kalshi = _get_kalshi()
             return kalshi.place_order(
                 ticker=proposal.ticker,
                 action="buy",
                 side=side,
                 count=count,
-                client_order_id=prop_id
+                client_order_id=proposal_id,
             )
 
         # Execute via circuit breaker
@@ -212,7 +242,7 @@ async def propose_trade(proposal: TradeProposal) -> Dict[str, Any]:
             "message": f"Circuit Breaker OPEN: {e}"
         }
     except Exception as e:
-        logger.error(f"Execution error for {prop_id}: {e}")
+        logger.error("Execution error for %s: %s", proposal_id, e)
         return {
             "success": False,
             "message": f"Execution error: {str(e)}"

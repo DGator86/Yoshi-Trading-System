@@ -9,8 +9,10 @@ Supports continuous background running and Telegram alerts.
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +29,7 @@ from src.gnosis.particle.quantum import QuantumPriceEngine # For param hot-reloa
 from src.gnosis.utils.kalshi_client import KalshiClient  # noqa: E402
 import src.gnosis.utils.notifications as notify  # noqa: E402
 from src.gnosis.ingest.ohlcv_aggregator import DataSourceAggregator  # Task 1
+from src.gnosis.execution.proposal_outbox import ProposalOutbox, OutboxConfig  # noqa: E402
 
 # Load environment variables
 load_dotenv()
@@ -270,6 +273,12 @@ async def main():
         rate_limit_ms=250,
         stale_after_sec=180,
     )
+
+    trading_core_url = os.getenv("TRADING_CORE_URL", "http://127.0.0.1:8000").rstrip("/")
+    outbox = None
+    if args.bridge:
+        outbox_root = os.getenv("YOSHI_OUTBOX_DIR", "data/outbox")
+        outbox = ProposalOutbox(config=OutboxConfig(root_dir=outbox_root))
     
     # Task 4: Initialize Quantum Engine for Param Hot-Reload
     quantum_engine = QuantumPriceEngine()
@@ -288,6 +297,13 @@ async def main():
         
         # Task 4: Check for Ralph updates
         quantum_engine.maybe_reload_params()
+
+        # Drain any pending proposals first (if Trading Core is available).
+        if outbox is not None:
+            try:
+                outbox.flush(trading_core_url=trading_core_url, max_send=50, timeout_s=5.0)
+            except Exception:  # pylint: disable=broad-except
+                pass
 
         live_data = None
         if args.live:
@@ -348,6 +364,7 @@ async def main():
 
             # Bridge to Trading Core
             if args.bridge:
+                enqueued = 0
                 for opp in opps:
                     edge = opp['model_prob'] - opp['market_prob']
                     action = ("BUY_YES" if edge > 0.05 else "BUY_NO"
@@ -355,6 +372,7 @@ async def main():
 
                     if action != "NEUTRAL":
                         payload = {
+                            "proposal_id": uuid.uuid4().hex[:12],
                             "symbol": opp['symbol'],
                             "ticker": opp['ticker'],
                             "action": action,
@@ -363,27 +381,17 @@ async def main():
                             "model_prob": float(opp['model_prob']),
                             "edge": float(edge)
                         }
-                        try:
-                            # Note: requests is sync, blocking the loop briefly. 
-                            # Ideally use aiohttp, but keeping legacy bridge logic for now 
-                            # as user instructions focused on data layer.
-                            resp = requests.post(
-                                "http://127.0.0.1:8000/propose",
-                                json=payload,
-                                timeout=5
-                            )
-                            if resp.status_code == 200:
-                                logger.info(
-                                    "Bridged %s for %s to Trading Core",
-                                    action, opp['symbol']
-                                )
-                            else:
-                                logger.error(
-                                    "Bridge failed: %d",
-                                    resp.status_code
-                                )
-                        except Exception as e:  # pylint: disable=broad-except
-                            logger.error("Bridge connection error: %s", e)
+                        if outbox is not None:
+                            outbox.enqueue(payload)
+                            enqueued += 1
+                            logger.info("Enqueued proposal %s (%s %s)", payload["proposal_id"], opp["symbol"], action)
+
+                # Attempt immediate delivery once per scan.
+                if outbox is not None and enqueued > 0:
+                    try:
+                        outbox.flush(trading_core_url=trading_core_url, max_send=50, timeout_s=5.0)
+                    except Exception:  # pylint: disable=broad-except
+                        pass
 
             # Check cooldown
             if time.time() - last_alert_time > cooldown:
