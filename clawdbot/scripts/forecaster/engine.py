@@ -228,17 +228,18 @@ class Forecaster:
         result = fc.forecast("BTCUSDT", horizon_hours=24)
     """
 
-    def __init__(self,
-                 mc_iterations: int = 50_000,
-                 mc_steps: int = 48,
-                 mc_seed: int = 42,
-                 enable_mc: bool = True,
-                 enable_regime_gate: bool = True,
-                 enable_hybrid_ml: bool = True,
-                 enable_auto_fix: bool = True):
-                 enable_auto_fix: bool = True,
-                 enable_particle_candles: bool = True,
-                 enable_manifold_patterns: bool = True):
+    def __init__(
+        self,
+        mc_iterations: int = 50_000,
+        mc_steps: int = 48,
+        mc_seed: int = 42,
+        enable_mc: bool = True,
+        enable_regime_gate: bool = True,
+        enable_hybrid_ml: bool = True,
+        enable_auto_fix: bool = True,
+        enable_particle_candles: bool = True,
+        enable_manifold_patterns: bool = True,
+    ):
         # ── Instantiate all modules ───────────────────────
         self.technical = TechnicalModule()
         self.classical = ClassicalStatsModule()

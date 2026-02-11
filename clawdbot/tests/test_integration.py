@@ -13,6 +13,20 @@ import os
 import json
 import time
 
+# NOTE: This file is a standalone integration runner (not pytest-native).
+# When collected by pytest, skip module execution to avoid sys.exit() during
+# test collection. Run it directly as a script instead.
+if __name__ != "__main__":  # pragma: no cover
+    try:
+        import pytest  # type: ignore
+
+        pytest.skip(
+            "clawdbot/tests/test_integration.py is a standalone runner; run it directly.",
+            allow_module_level=True,
+        )
+    except Exception:
+        pass
+
 # Ensure project root is on path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
