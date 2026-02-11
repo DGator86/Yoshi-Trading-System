@@ -21,11 +21,28 @@ def parse_ranges(ranges_arg: Optional[str]) -> Optional[List[Tuple[pd.Timestamp,
     for raw_range in raw_ranges:
         if ":" not in raw_range:
             raise ValueError(f"Invalid range '{raw_range}'. Expected start:end format.")
-        start_str, end_str = [part.strip() for part in raw_range.split(":", 1)]
-        if not start_str or not end_str:
+        # ISO timestamps contain ":" (HH:MM:SS), so we can't split on the first colon.
+        # Instead, try all split points until both sides parse as timestamps.
+        parts = [p.strip() for p in raw_range.split(":")]
+        if len(parts) < 2:
             raise ValueError(f"Invalid range '{raw_range}'. Expected start:end format.")
-        start_ts = parse_iso_timestamp(start_str)
-        end_ts = parse_iso_timestamp(end_str)
+
+        start_ts = end_ts = None
+        for i in range(1, len(parts)):
+            start_str = ":".join(parts[:i]).strip()
+            end_str = ":".join(parts[i:]).strip()
+            if not start_str or not end_str:
+                continue
+            try:
+                _start = parse_iso_timestamp(start_str)
+                _end = parse_iso_timestamp(end_str)
+            except Exception:
+                continue
+            start_ts, end_ts = _start, _end
+            break
+
+        if start_ts is None or end_ts is None:
+            raise ValueError(f"Invalid range '{raw_range}'. Expected start:end format.")
         if start_ts >= end_ts:
             raise ValueError(f"Invalid range '{raw_range}'. Start must be before end.")
         ranges.append((start_ts, end_ts))

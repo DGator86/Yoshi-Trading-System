@@ -7,7 +7,8 @@ from mtf.date_ranges import filter_by_ranges_union, parse_ranges
 
 
 def _make_bars(start: str, periods: int) -> pd.DataFrame:
-    ts = pd.date_range(start=start, periods=periods, freq="H", tz="UTC")
+    # pandas >= 2.2 prefers lowercase aliases (e.g. "h" not "H")
+    ts = pd.date_range(start=start, periods=periods, freq="h", tz="UTC")
     return pd.DataFrame(
         {
             "timestamp": ts,
