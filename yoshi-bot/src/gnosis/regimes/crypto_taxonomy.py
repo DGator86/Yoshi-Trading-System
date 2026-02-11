@@ -280,6 +280,8 @@ def compute_features_1m(bars_1m: pd.DataFrame, cfg: CryptoRegimeConfig) -> pd.Da
         # ER
         s["er_15m"] = efficiency_ratio(s["close"], horizon_bars=int(cfg.er_short))
         s["er_60m"] = efficiency_ratio(s["close"], horizon_bars=int(cfg.er_long))
+        s["er_5m"] = efficiency_ratio(s["close"], horizon_bars=5)
+        s["er_1h"] = efficiency_ratio(s["close"], horizon_bars=60)
 
         # Persistence
         direction = np.sign((s["close"] - s["prev_close"]).fillna(0.0)).astype(float)
@@ -308,6 +310,60 @@ def compute_features_1m(bars_1m: pd.DataFrame, cfg: CryptoRegimeConfig) -> pd.Da
             bins=[-1, 6, 12, 18, 23],
             labels=["asia", "europe", "us", "us_asia_overlap"],
         ).astype(str)
+
+        # ---- Higher-TF derived features (built only from this 1m ledger) ----
+        # These are aligned back onto the 1m rows via asof-join to the last
+        # closed 5m / 1h bar.
+        def _resample(rule: str) -> pd.DataFrame:
+            ss = s[["timestamp", "open", "high", "low", "close", "volume"]].dropna(subset=["timestamp"]).copy()
+            ss = ss.set_index("timestamp").sort_index()
+            agg = ss.resample(rule).agg(
+                {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                }
+            )
+            agg = agg.dropna(subset=["open", "high", "low", "close"], how="any")
+            agg = agg.reset_index()
+            return agg
+
+        def _add_tf_features(tf_name: str, rule: str, minutes_per_bar: int) -> None:
+            tf = _resample(rule)
+            if tf.empty:
+                s[f"atr_{tf_name}"] = np.nan
+                s[f"rv_{tf_name}"] = np.nan
+                return
+
+            tf["prev_close"] = tf["close"].shift(1)
+            hl = tf["high"] - tf["low"]
+            hc = (tf["high"] - tf["prev_close"]).abs()
+            lc = (tf["low"] - tf["prev_close"]).abs()
+            tf["tr"] = np.nanmax(np.vstack([hl.to_numpy(), hc.to_numpy(), lc.to_numpy()]), axis=0)
+            # Preserve "time horizon" of n_short minutes by scaling span in bars.
+            span_bars = max(2, int(round(int(cfg.n_short) / max(minutes_per_bar, 1))))
+            minp_tf = max(2, span_bars // 3)
+            tf[f"atr_{tf_name}"] = tf["tr"].ewm(span=span_bars, adjust=False, min_periods=minp_tf).mean()
+            tf["ret"] = np.log((tf["close"] + _eps()) / (tf["prev_close"] + _eps()))
+            tf[f"rv_{tf_name}"] = tf["ret"].rolling(span_bars, min_periods=minp_tf).std()
+
+            # Align last closed bar to each 1m timestamp.
+            joined = pd.merge_asof(
+                s[["timestamp"]].sort_values("timestamp"),
+                tf[["timestamp", f"atr_{tf_name}", f"rv_{tf_name}"]].sort_values("timestamp"),
+                on="timestamp",
+                direction="backward",
+            )
+            s[f"atr_{tf_name}"] = joined[f"atr_{tf_name}"].to_numpy()
+            s[f"rv_{tf_name}"] = joined[f"rv_{tf_name}"].to_numpy()
+
+        _add_tf_features("5m", rule="5min", minutes_per_bar=5)
+        _add_tf_features("1h", rule="1h", minutes_per_bar=60)
+
+        # Naming aliases expected by some downstream tooling/specs.
+        s["gap_proxy"] = s["gap_1m"]
 
         out.append(s)
 
