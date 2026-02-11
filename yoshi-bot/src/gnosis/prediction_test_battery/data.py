@@ -25,7 +25,8 @@ def load_candles(path: Path) -> pd.DataFrame:
 
 def generate_synthetic_data(n: int = 240, seed: int = 42) -> tuple[pd.DataFrame, ForecastArtifact]:
     rng = np.random.default_rng(seed)
-    timestamps = pd.date_range("2023-01-01", periods=n, freq="H")
+    # pandas >= 2.2 prefers lowercase aliases (e.g. "h" not "H")
+    timestamps = pd.date_range("2023-01-01", periods=n, freq="h")
     returns = rng.normal(0, 0.01, size=n)
     prices = 100 * np.exp(np.cumsum(returns))
     high = prices * (1 + rng.normal(0.001, 0.002, size=n))

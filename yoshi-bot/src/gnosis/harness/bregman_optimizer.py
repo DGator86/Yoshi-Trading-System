@@ -199,7 +199,10 @@ class ProjectFWOptimizer:
             
             if len(convergence_history) >= 2:
                 improvement = abs(convergence_history[-2] - convergence_history[-1])
-                if improvement < self.config.tolerance:
+                # Don't stop on the very first step: some objectives can produce an
+                # unchanged iterate on the first projection (e.g. due to bounds),
+                # and we still want to attempt at least 2 iterations.
+                if self._iteration >= 2 and improvement < self.config.tolerance:
                     if self.config.verbose:
                         print(f"ProjectFW: Converged at iteration {self._iteration} "
                               f"(improvement {improvement} < tolerance {self.config.tolerance})")
