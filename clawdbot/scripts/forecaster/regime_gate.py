@@ -63,53 +63,35 @@ class RegimeProfile:
 
 # Default profiles (updated as backtests accumulate)
 DEFAULT_REGIME_PROFILES = {
+    # Conservative, self-consistent defaults:
+    # - If a regime is anti-predictive (HR < 50%) or low-sample, dampen/block.
+    # - Only boost in regimes with demonstrated edge and adequate samples.
     Regime.TREND_UP: RegimeProfile(
         name="trend_up",
-        tier="weak",             # Too few samples (n=3) to be confident
-        observed_hr=0.667,
-        n_samples=3,
-        confidence_multiplier=0.85,
-        min_confidence_to_trade=0.55,
-        notes="Potentially strong but n=3 is unreliable",
-    ),
-    Regime.TREND_DOWN: RegimeProfile(
-        name="trend_down",
-        tier="weak",
-        observed_hr=0.50,
-        n_samples=10,
-        confidence_multiplier=0.75,
-        min_confidence_to_trade=0.55,
-        notes="No clear edge in backtest",
-    ),
-    Regime.RANGE: RegimeProfile(
-        name="range",
-        tier="blocked",          # HR=41.8% is anti-predictive
-        observed_hr=0.418,
-        n_samples=55,
-        tier="blocked",          # HR=0% (n=5) — fully anti-predictive
+        tier="blocked",
         observed_hr=0.00,
         n_samples=5,
-        confidence_multiplier=0.30,  # heavy dampening
+        confidence_multiplier=0.30,
         min_confidence_to_trade=0.65,
-        notes="Anti-predictive (0/5). Signal is INVERTED in this regime.",
+        notes="Anti-predictive in diagnostics; block trades (or invert in a dedicated strategy).",
     ),
     Regime.TREND_DOWN: RegimeProfile(
         name="trend_down",
-        tier="strong",           # HR=58.3% (n=12) — only edge regime
+        tier="strong",
         observed_hr=0.583,
         n_samples=12,
-        confidence_multiplier=1.05,  # slight boost
+        confidence_multiplier=1.05,
         min_confidence_to_trade=0.52,
-        notes="Best regime. Only regime with statistical edge.",
+        notes="Best regime in diagnostics; only regime with measurable edge.",
     ),
     Regime.RANGE: RegimeProfile(
         name="range",
-        tier="blocked",          # HR=46.2% (n=52) — anti-predictive
+        tier="blocked",
         observed_hr=0.462,
         n_samples=52,
         confidence_multiplier=0.50,
-        min_confidence_to_trade=0.60,  # Very high bar to trade
-        notes="Anti-predictive. Direction signals should be dampened.",
+        min_confidence_to_trade=0.60,
+        notes="Anti-predictive; direction signals should be dampened/blocked.",
     ),
     Regime.VOL_EXPANSION: RegimeProfile(
         name="vol_expansion",
@@ -122,13 +104,7 @@ DEFAULT_REGIME_PROFILES = {
     ),
     Regime.POST_JUMP: RegimeProfile(
         name="post_jump",
-        tier="strong",
-        observed_hr=0.65,
-        n_samples=8,
-        confidence_multiplier=1.10,
-        min_confidence_to_trade=0.52,
-        notes="Best regime for directional trading",
-        tier="weak",             # HR=50% (n=6) — coin flip
+        tier="weak",
         observed_hr=0.50,
         n_samples=6,
         confidence_multiplier=0.75,
