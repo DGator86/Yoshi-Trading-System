@@ -4,6 +4,7 @@ Provides authentication and data fetching for Kalshi prediction markets.
 """
 import base64
 import os
+import re
 import time
 from typing import Dict, Any, Optional, List
 
@@ -25,17 +26,76 @@ class KalshiClient:
 
     BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
+    _PEM_FILE_CANDIDATES = [
+        os.getenv("KALSHI_PRIVATE_KEY_FILE", "").strip(),
+        os.path.expanduser("~/.kalshi/private_key.pem"),
+        "/root/.kalshi/private_key.pem",
+        "/home/root/.kalshi/private_key.pem",
+    ]
+
+    @staticmethod
+    def _fix_pem(raw: str) -> str:
+        """Normalize common PEM mangling cases (\\n literals, one-line, spaced base64)."""
+        if not raw:
+            return raw
+        raw = raw.strip()
+
+        # Strip outer quotes
+        if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+            raw = raw[1:-1]
+
+        # Replace literal \\n with real newlines (systemd-friendly single-line envs)
+        if "\\n" in raw:
+            raw = raw.replace("\\n", "\n")
+
+        raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+
+        if "-----BEGIN" in raw and raw.count("\n") <= 2:
+            m = re.search(
+                r"-----BEGIN ([A-Z ]+)-----\s*(.*?)\s*-----END ([A-Z ]+)-----",
+                raw,
+                flags=re.DOTALL,
+            )
+            if m:
+                key_type = m.group(1)
+                body = re.sub(r"\s+", "", m.group(2))
+                lines = [body[i:i + 64] for i in range(0, len(body), 64)]
+                return f"-----BEGIN {key_type}-----\n" + "\n".join(lines) + f"\n-----END {key_type}-----"
+
+        return raw.strip()
+
+    @classmethod
+    def _load_private_key_material(cls) -> str:
+        """Load private key PEM from env var, file path env, or standard locations."""
+        pk = os.getenv("KALSHI_PRIVATE_KEY", "").strip()
+
+        # Allow pointing KALSHI_PRIVATE_KEY at a file path.
+        if pk and os.path.isfile(pk):
+            try:
+                return open(pk, "r", encoding="utf-8").read()
+            except Exception:
+                pass
+
+        if pk:
+            return pk
+
+        for path in cls._PEM_FILE_CANDIDATES:
+            if not path:
+                continue
+            if os.path.isfile(path):
+                return open(path, "r", encoding="utf-8").read()
+
+        return ""
+
     def __init__(self):
         self.key_id = os.getenv("KALSHI_KEY_ID")
-        self.private_key_str = os.getenv("KALSHI_PRIVATE_KEY")
+        self.private_key_str = self._load_private_key_material()
 
         if not self.key_id or not self.private_key_str:
             raise ValueError("Kalshi credentials missing in .env")
 
-        # Clean up the private key format if needed (remove quotes if added)
-        if (self.private_key_str.startswith('"') and
-                self.private_key_str.endswith('"')):
-            self.private_key_str = self.private_key_str[1:-1]
+        # Clean up common private key formatting issues.
+        self.private_key_str = self._fix_pem(self.private_key_str)
 
         self.private_key = serialization.load_pem_private_key(
             self.private_key_str.encode(),
