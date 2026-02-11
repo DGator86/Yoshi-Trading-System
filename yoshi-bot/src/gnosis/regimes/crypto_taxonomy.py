@@ -434,7 +434,7 @@ def classify_liquidity_overlay(df_feat: pd.DataFrame, cfg: CryptoRegimeConfig) -
     d_NR = np.zeros(len(df), dtype=float)
     d_TH = 2.0 * (TH_act - 0.45)
 
-    scores = np.vstack([d_TD.to_numpy(), d_NR, d_TH.to_numpy()]).T
+    scores = np.vstack([np.asarray(d_TD, dtype=float), d_NR, np.asarray(d_TH, dtype=float)]).T
     probs = softmax_matrix(scores, beta=float(cfg.beta_liquidity))
     df["p_TD"] = probs[:, 0]
     df["p_NR"] = probs[:, 1]
@@ -465,7 +465,7 @@ def classify_funding_overlay(df_feat: pd.DataFrame, cfg: CryptoRegimeConfig, fun
     d_FPminus = 2.0 * (FP_minus_act - 0.5)
     d_F0 = np.zeros(len(df), dtype=float)
 
-    scores = np.vstack([d_FPplus.to_numpy(), d_F0, d_FPminus.to_numpy()]).T
+    scores = np.vstack([np.asarray(d_FPplus, dtype=float), d_F0, np.asarray(d_FPminus, dtype=float)]).T
     probs = softmax_matrix(scores, beta=float(cfg.beta_funding))
     df["p_FPplus"] = probs[:, 0]
     df["p_F0"] = probs[:, 1]
