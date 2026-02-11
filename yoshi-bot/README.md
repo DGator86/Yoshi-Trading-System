@@ -147,6 +147,21 @@ The YAML includes:
 - `ORDER_METHOD_MULT`
 - event alphabet used for explicit event-time semantics.
 
+## Modular Forecasting Taxonomy Assets (12 Paradigms)
+
+A practical, implementation-oriented taxonomy for combining TA, classical stats,
+macro, derivatives, microstructure, on-chain, sentiment, ML, deep sequence,
+regime state machine, scenario MC, and crowd priors is versioned here:
+
+- Spec:
+  - [docs/crypto-forecasting-taxonomy.md](docs/crypto-forecasting-taxonomy.md)
+- Prompt artifact:
+  - [docs/crypto-forecasting-taxonomy-prompt.txt](docs/crypto-forecasting-taxonomy-prompt.txt)
+- Config/policy defaults:
+  - [configs/crypto_forecasting_taxonomy.yaml](configs/crypto_forecasting_taxonomy.yaml)
+- Code module (registry + gating + confidence):
+  - `src/gnosis/forecasting/modular_ensemble.py`
+
 ## Required Outputs (per run)
 - data/manifests/data_manifest.json
 - reports/latest/report.json

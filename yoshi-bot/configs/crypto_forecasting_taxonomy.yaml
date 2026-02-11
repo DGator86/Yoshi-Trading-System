@@ -1,0 +1,60 @@
+# Modular forecasting taxonomy + gating policy defaults.
+
+crypto_forecasting_taxonomy:
+  targets:
+    - next_return
+    - direction
+    - quantiles
+    - volatility
+    - tail_risk
+    - jump_probability
+    - regime
+    - barrier_probability
+
+  modules:
+    - technical_price_action
+    - classical_timeseries
+    - macro_factor
+    - derivatives_positioning
+    - orderflow_microstructure
+    - onchain_priors
+    - sentiment_attention
+    - ml_tabular_meta
+    - deep_sequence_distribution
+    - regime_state_machine
+    - scenario_monte_carlo
+    - crowd_prediction_markets
+
+  gating_policy:
+    cascade_prob_threshold: 0.30
+    trend_prob_threshold: 0.50
+    range_prob_threshold: 0.50
+    lfi_high_threshold: 1.00
+    jump_high_threshold: 0.20
+    spread_wide_bps: 12.0
+    depth_thin_threshold: 0.35
+    min_confidence: 0.05
+    max_confidence: 1.00
+    event_confidence_mult: 0.70
+
+  non_negotiable_validation:
+    split_policy:
+      - walk_forward_only
+      - embargo_enabled
+      - no_random_split
+    reporting:
+      - per_regime_metrics
+      - per_volatility_bucket_metrics
+      - calibration_curves
+      - quantile_losses
+      - brier_tail_scores
+
+  target_metrics:
+    direction: [hit_rate, balanced_accuracy, mcc, regime_conditional_hit_rate]
+    next_return: [mae, rmse, spearman_corr, ic]
+    quantiles: [pinball_loss, interval_coverage, sharpness, coverage_gap]
+    volatility: [mae, rmse, qlike, vol_regime_bucket_error]
+    tail_risk: [brier_score, precision_recall, roc_auc, event_recall_at_k]
+    jump_probability: [brier_score, precision_recall, f1, calibration_curve]
+    regime: [log_loss, balanced_accuracy, transition_f1, whipsaw_rate]
+    barrier_probability: [brier_score, log_loss, reliability_curve]
