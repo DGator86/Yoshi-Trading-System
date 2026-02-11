@@ -201,6 +201,32 @@ class QuantilePredictor:
         X = self._get_features(df)
         result = df[["symbol", "bar_idx", "timestamp_end", "close"]].copy()
 
+        # Pass-through context for audits/evaluation (no future information).
+        passthrough_prefixes = (
+            "K_prob_",
+            "P_prob_",
+            "C_prob_",
+            "O_prob_",
+            "F_prob_",
+            "G_prob_",
+            "S_prob_",
+        )
+        passthrough_cols = []
+        for c in df.columns:
+            if c == "regime_entropy":
+                passthrough_cols.append(c)
+                continue
+            if c.endswith("_label") or c.endswith("_pmax") or c.endswith("_entropy"):
+                passthrough_cols.append(c)
+                continue
+            if c.startswith(passthrough_prefixes):
+                passthrough_cols.append(c)
+                continue
+
+        for c in sorted(set(passthrough_cols)):
+            if c not in result.columns:
+                result[c] = df[c].values
+
         # Handle Bregman-FW backend separately
         if self.backend == "bregman_fw" and 'bregman_fw' in self.models:
             preds = self.models['bregman_fw'].predict(X)

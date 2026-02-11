@@ -379,6 +379,20 @@ class KPCOFGSClassifier:
         df["S_pmax"] = np.max(S_probs, axis=1)
         df["S_entropy"] = _entropy(S_probs)
 
+        # Store probabilities for all levels (for calibration, gating, and audits).
+        for i, label in enumerate(self.K_labels):
+            df[f"K_prob_{label}"] = K_probs[:, i]
+        for i, label in enumerate(self.P_labels):
+            df[f"P_prob_{label}"] = P_probs[:, i]
+        for i, label in enumerate(self.C_labels):
+            df[f"C_prob_{label}"] = C_probs[:, i]
+        for i, label in enumerate(self.O_labels):
+            df[f"O_prob_{label}"] = O_probs[:, i]
+        for i, label in enumerate(self.F_labels):
+            df[f"F_prob_{label}"] = F_probs[:, i]
+        for i, label in enumerate(self.G_labels):
+            df[f"G_prob_{label}"] = G_probs[:, i]
+
         # Store S probabilities for calibration (needed for isotonic calibration)
         for i, label in enumerate(self.S_labels):
             df[f"S_prob_{label}"] = S_probs[:, i]

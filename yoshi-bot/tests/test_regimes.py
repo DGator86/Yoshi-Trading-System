@@ -69,3 +69,11 @@ def test_kpcofgs_probability_outputs():
     s_probs = result[s_prob_cols].values
     row_sums = s_probs.sum(axis=1)
     assert np.allclose(row_sums, 1.0, atol=1e-5), "S probabilities don't sum to 1"
+
+    # Check non-S level probability families exist (at least K and P) and sum to 1.
+    for prefix in ["K_prob_", "P_prob_", "C_prob_", "O_prob_", "F_prob_", "G_prob_"]:
+        prob_cols = [c for c in result.columns if c.startswith(prefix)]
+        assert len(prob_cols) > 0, f"Missing probability columns for {prefix}"
+        probs = result[prob_cols].values
+        sums = probs.sum(axis=1)
+        assert np.allclose(sums, 1.0, atol=1e-5), f"{prefix} probabilities don't sum to 1"
