@@ -525,6 +525,7 @@ def add_multihorizon_regime_probs_from_1m(
       - p_<R>_1m, p_<R>_15m, p_<R>_1h, p_<R>_4h
       - p_<R>_final, conf_final, regime_label_final
       - delta_tv_final, disagreement_D_1m_1h, G_stab, G_dis
+      - transition_flag_final, transition_type_final
     """
     df = ledger_1m.copy()
     prob_cols = ["p_MR", "p_TR", "p_CP", "p_EX", "p_LQ"]
@@ -598,6 +599,15 @@ def add_multihorizon_regime_probs_from_1m(
         d1 = float(stabilizer.get("Delta1", 0.30))
         denom = max(d1 - d0, 1e-9)
         s["G_stab"] = 1.0 - np.clip((delta - d0) / denom, 0.0, 1.0)
+
+        # Transitions on final label.
+        prev = s["regime_label_final"].shift(1)
+        s["transition_flag_final"] = (s["regime_label_final"] != prev) & prev.notna()
+        s["transition_type_final"] = np.where(
+            s["transition_flag_final"],
+            prev.astype(str) + "->" + s["regime_label_final"].astype(str),
+            "",
+        )
 
         out_frames.append(s)
 
