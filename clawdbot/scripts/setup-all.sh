@@ -33,7 +33,8 @@ NC='\033[0m'
 CLAWDBOT_REPO="https://github.com/DGator86/ClawdBot-V1.git"
 # Ultimate-fix: default to ultimate-fix branch for enhanced ML + regime gating
 CLAWDBOT_BRANCH="${CLAWDBOT_BRANCH:-ultimate-fix}"
-KALSHI_KEY_ID="6858062e-6884-43b5-b002-0e13391be331"
+# Never hardcode secrets in tracked scripts. Provide KALSHI_KEY_ID via .env or prompt.
+KALSHI_KEY_ID="${KALSHI_KEY_ID:-}"
 KALSHI_KEY_DIR="$HOME/.kalshi"
 KALSHI_KEY_FILE="$KALSHI_KEY_DIR/private_key.pem"
 
@@ -192,11 +193,19 @@ touch "$YOSHI_ENV" 2>/dev/null
 # Write Key ID if missing
 EXISTING_KID=$(grep "^KALSHI_KEY_ID=" "$YOSHI_ENV" 2>/dev/null | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
 if [ -z "$EXISTING_KID" ] || [ "$EXISTING_KID" = "your_kalshi_key_id_here" ]; then
+    if [ -z "$KALSHI_KEY_ID" ]; then
+        echo -e "  ${YELLOW}Kalshi Key ID not found.${NC}"
+        read -p "  Enter Kalshi API Key ID (or press Enter to skip): " KALSHI_KEY_ID </dev/tty 2>/dev/null || true
+    fi
+    if [ -z "$KALSHI_KEY_ID" ]; then
+        warn "No KALSHI_KEY_ID provided; skipping Key ID setup"
+    else
     sed -i '/^KALSHI_KEY_ID=/d' "$YOSHI_ENV"
     echo "" >> "$YOSHI_ENV"
     echo "# Kalshi API (added by setup-all.sh)" >> "$YOSHI_ENV"
     echo "KALSHI_KEY_ID=$KALSHI_KEY_ID" >> "$YOSHI_ENV"
     ok "Key ID: ${KALSHI_KEY_ID:0:12}..."
+    fi
 else
     ok "Key ID: ${EXISTING_KID:0:12}..."
 fi
