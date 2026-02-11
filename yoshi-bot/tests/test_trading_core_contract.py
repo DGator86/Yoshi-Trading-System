@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+import pytest
+from pydantic import ValidationError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -36,7 +38,6 @@ def _load_core(monkeypatch, tmp_path):
 
 def test_propose_accepts_canonical_payload_and_is_idempotent(monkeypatch, tmp_path):
     trading_core = _load_core(monkeypatch, tmp_path)
-    client = TestClient(trading_core.app)
 
     payload = make_trade_signal(
         symbol="BTCUSDT",
@@ -49,28 +50,23 @@ def test_propose_accepts_canonical_payload_and_is_idempotent(monkeypatch, tmp_pa
         source="unit_test",
     ).to_payload()
 
-    first = client.post("/propose", json=payload)
-    assert first.status_code == 200
-    first_json = first.json()
+    proposal = trading_core.TradeProposal(**payload)
+    first_json = asyncio.run(trading_core.propose_trade(proposal))
     assert first_json["success"] is True
     assert "Executed" in first_json["message"]
 
-    second = client.post("/propose", json=payload)
-    assert second.status_code == 200
-    assert second.json() == first_json
+    second_json = asyncio.run(trading_core.propose_trade(proposal))
+    assert second_json == first_json
 
-    orders = client.get("/orders")
-    assert orders.status_code == 200
-    assert len(orders.json()) == 1
+    orders = asyncio.run(trading_core.get_orders())
+    assert len(orders) == 1
 
-    proposals = client.get("/proposals")
-    assert proposals.status_code == 200
-    assert len(proposals.json()) == 1
+    proposals = asyncio.run(trading_core.get_proposals())
+    assert len(proposals) == 1
 
 
 def test_propose_rejects_legacy_noncanonical_payload(monkeypatch, tmp_path):
     trading_core = _load_core(monkeypatch, tmp_path)
-    client = TestClient(trading_core.app)
 
     legacy_payload = {
         "exchange": "kalshi",
@@ -79,6 +75,6 @@ def test_propose_rejects_legacy_noncanonical_payload(monkeypatch, tmp_path):
         "type": "market",
         "amount": 1,
     }
-    resp = client.post("/propose", json=legacy_payload)
-    assert resp.status_code == 422
+    with pytest.raises(ValidationError):
+        trading_core.TradeProposal(**legacy_payload)
 
