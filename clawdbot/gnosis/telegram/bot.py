@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib import request, error as urlerror, parse as urlparse
 
@@ -274,6 +276,14 @@ class TelegramBot:
             msg = self._fmt.help_message()
             self.api.send_message(chat_id, msg, "MarkdownV2")
 
+        elif cmd in ("/chatid", "/id"):
+            # Phone-friendly: show + persist so other services can send alerts.
+            if not self.chat_id:
+                self.chat_id = chat_id
+            persisted = self._persist_chat_id(self.chat_id)
+            suffix = " (saved to .env)" if persisted else ""
+            self.api.send_message(chat_id, f"Chat ID: {self.chat_id}{suffix}", "")
+
         elif cmd == "/status":
             self.send_status()
 
@@ -289,6 +299,66 @@ class TelegramBot:
 
         else:
             self.api.send_message(chat_id, f"Unknown command: {text.split()[0]}\nTry /help", "")
+
+    def _persist_chat_id(self, chat_id: str) -> bool:
+        """Persist TELEGRAM_CHAT_ID so other services can send alerts.
+
+        Avoids rewriting the entire .env as key/value lines (some env files
+        contain multi-line PEM values). We only upsert the TELEGRAM_CHAT_ID line.
+        """
+        if not chat_id:
+            return False
+
+        os.environ["TELEGRAM_CHAT_ID"] = str(chat_id)
+
+        candidates: list[Path] = []
+        explicit = os.environ.get("TELEGRAM_ENV_PATH", "").strip()
+        if explicit:
+            candidates.append(Path(explicit))
+
+        candidates.extend(
+            [
+                Path(os.getcwd()) / ".env",
+                Path("/root/Yoshi-Trading-System/.env"),
+                Path("/root/Yoshi-Bot/.env"),
+                Path("/root/ClawdBot-V1/.env"),
+                Path("/home/root/Yoshi-Trading-System/.env"),
+                Path("/home/root/Yoshi-Bot/.env"),
+                Path("/home/root/ClawdBot-V1/.env"),
+                Path.home() / ".env",
+            ]
+        )
+
+        target = next((p for p in candidates if p.exists()), None)
+        if target is None:
+            # Create in current directory as a last resort.
+            target = Path(os.getcwd()) / ".env"
+
+        try:
+            self._upsert_env_line(target, "TELEGRAM_CHAT_ID", str(chat_id))
+            try:
+                target.chmod(0o600)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _upsert_env_line(env_path: Path, key: str, value: str) -> None:
+        content = ""
+        if env_path.exists():
+            content = env_path.read_text(encoding="utf-8", errors="ignore")
+        pattern = re.compile(rf"^{re.escape(key)}=.*$", flags=re.MULTILINE)
+        if pattern.search(content):
+            content = pattern.sub(f"{key}={value}", content)
+        else:
+            if content and not content.endswith("\n"):
+                content += "\n"
+            content += f"\n{key}={value}\n"
+
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text(content, encoding="utf-8")
 
     def _force_scan(self, chat_id: str):
         """Force a scan cycle and report results."""
@@ -421,9 +491,10 @@ class TelegramBot:
                         if not self.chat_id and from_chat:
                             self.chat_id = from_chat
                             print(f"[TG] Chat ID discovered: {self.chat_id}")
+                            self._persist_chat_id(self.chat_id)
                             self.api.send_message(
                                 from_chat,
-                                f"Chat ID set: {from_chat}\nAdd TELEGRAM_CHAT_ID={from_chat} to .env",
+                                f"Chat ID set: {from_chat}\nSaved to .env for alerts.",
                                 "",
                             )
 

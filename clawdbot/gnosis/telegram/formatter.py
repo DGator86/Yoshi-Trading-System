@@ -248,6 +248,7 @@ class MessageFormatter:
             "/status — System status\n"
             "/ralph — Ralph learning state\n"
             "/params — Current hyperparameters\n"
+            "/chatid — Show (and save) your chat id\n"
             "/help — This message\n"
             "\n"
             "_Alerts are sent automatically when BUY signals appear\\._"
