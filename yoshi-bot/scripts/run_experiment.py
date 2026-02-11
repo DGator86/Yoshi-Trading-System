@@ -10,6 +10,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Load local secrets from yoshi-bot/.env if present.
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    _env_path = Path(__file__).resolve().parents[1] / ".env"
+    if _env_path.exists():
+        load_dotenv(dotenv_path=_env_path, override=False)
+except ImportError:
+    pass
+
 import yaml
 import pandas as pd
 import numpy as np

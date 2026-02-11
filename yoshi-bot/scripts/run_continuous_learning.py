@@ -10,6 +10,16 @@ from pathlib import Path
 
 import pandas as pd
 
+# Load local secrets from yoshi-bot/.env if present.
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    _env_path = Path(__file__).resolve().parents[1] / ".env"
+    if _env_path.exists():
+        load_dotenv(dotenv_path=_env_path, override=False)
+except ImportError:
+    pass
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

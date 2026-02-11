@@ -55,12 +55,15 @@ Set only what you use:
 
 1. Copy template:
    ```bash
-   cp .env.example .env
+   # from repo root:
+   cp yoshi-bot/.env.example yoshi-bot/.env
+   # or if you're already in yoshi-bot/:
+   # cp .env.example .env
    ```
-2. Fill values in `.env`.
+2. Fill values in `yoshi-bot/.env`.
 3. Keep file permissions strict:
    ```bash
-   chmod 600 .env
+   chmod 600 yoshi-bot/.env
    ```
 
 ## Guardrails

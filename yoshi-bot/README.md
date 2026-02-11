@@ -41,7 +41,7 @@ All credentials must be provided via environment variables only.
 - Setup guide:
   - [docs/secrets-and-credentials.md](docs/secrets-and-credentials.md)
 - Copy template:
-  - `cp .env.example .env`
+  - `cp yoshi-bot/.env.example yoshi-bot/.env`
 
 If any key has been exposed in chat/logs, rotate it immediately before use.
 
