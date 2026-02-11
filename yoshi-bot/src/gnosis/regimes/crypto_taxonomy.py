@@ -499,3 +499,108 @@ def build_regime_ledger_1m(
     feat["p_sum"] = ps
     return feat
 
+
+def _rolling_mean_probs(df: pd.DataFrame, prob_cols: list[str], window: int) -> pd.DataFrame:
+    out = pd.DataFrame(index=df.index)
+    w = max(int(window), 1)
+    minp = max(1, w // 3)
+    for c in prob_cols:
+        out[c] = df[c].rolling(w, min_periods=minp).mean()
+    return out
+
+
+def add_multihorizon_regime_probs_from_1m(
+    ledger_1m: pd.DataFrame,
+    lambdas: Optional[dict[str, float]] = None,
+    disagreement_penalty: Optional[dict[str, float]] = None,
+    stabilizer: Optional[dict[str, float]] = None,
+) -> pd.DataFrame:
+    """Add p^(h) and p_final regime probabilities derived from 1m ledger.
+
+    This is a practical implementation of "1m informs higher TF" without
+    fetching any higher timeframe data; all higher-TF probabilities are
+    rolling averages of the 1m probability vector.
+
+    Adds columns:
+      - p_<R>_1m, p_<R>_15m, p_<R>_1h, p_<R>_4h
+      - p_<R>_final, conf_final, regime_label_final
+      - delta_tv_final, disagreement_D_1m_1h, G_stab, G_dis
+    """
+    df = ledger_1m.copy()
+    prob_cols = ["p_MR", "p_TR", "p_CP", "p_EX", "p_LQ"]
+    if any(c not in df.columns for c in prob_cols):
+        raise ValueError("ledger_1m must contain p_MR/p_TR/p_CP/p_EX/p_LQ")
+
+    lambdas = lambdas or {"1m": 0.40, "15m": 0.30, "1h": 0.20, "4h": 0.10}
+    disagreement_penalty = disagreement_penalty or {"D0": 0.15, "D1": 0.35}
+    stabilizer = stabilizer or {"Delta0": 0.10, "Delta1": 0.30}
+
+    # Per-symbol rolling probabilities for each horizon.
+    out_frames = []
+    for sym, sdf in df.groupby("symbol", sort=False):
+        s = sdf.sort_values("timestamp").copy()
+
+        p1m = s[prob_cols].copy()
+        p15 = _rolling_mean_probs(s, prob_cols, window=15)
+        p1h = _rolling_mean_probs(s, prob_cols, window=60)
+        p4h = _rolling_mean_probs(s, prob_cols, window=240)
+
+        # Rename to horizon-specific.
+        for base in prob_cols:
+            s[f"{base}_1m"] = p1m[base].to_numpy()
+            s[f"{base}_15m"] = p15[base].to_numpy()
+            s[f"{base}_1h"] = p1h[base].to_numpy()
+            s[f"{base}_4h"] = p4h[base].to_numpy()
+
+        # Weighted mixture -> final probabilities.
+        w1 = float(lambdas.get("1m", 0.0))
+        w15 = float(lambdas.get("15m", 0.0))
+        w1h = float(lambdas.get("1h", 0.0))
+        w4h = float(lambdas.get("4h", 0.0))
+        wsum = max(w1 + w15 + w1h + w4h, _eps())
+
+        mix = (
+            w1 * p1m.to_numpy()
+            + w15 * p15.to_numpy()
+            + w1h * p1h.to_numpy()
+            + w4h * p4h.to_numpy()
+        ) / wsum
+        mix = np.clip(mix, 0.0, 1.0)
+        mix_sum = mix.sum(axis=1, keepdims=True)
+        mix_sum = np.where(mix_sum <= 0.0, 1.0, mix_sum)
+        p_final = mix / mix_sum
+
+        # Label/conf.
+        regimes = np.array(["MR", "TR", "CP", "EX", "LQ"], dtype=object)
+        arg = np.argmax(p_final, axis=1)
+        conf = np.max(p_final, axis=1)
+        s["regime_label_final"] = regimes[arg]
+        s["conf_final"] = conf
+        for j, r in enumerate(regimes):
+            s[f"p_{r}_final"] = p_final[:, j]
+
+        # Churn Δ on final probs.
+        p_prev = np.vstack([p_final[0], p_final[:-1]])
+        delta = 0.5 * np.sum(np.abs(p_final - p_prev), axis=1)
+        s["delta_tv_final"] = delta
+
+        # Disagreement between 1m and 1h (TV distance).
+        D = 0.5 * np.sum(np.abs(p1m.to_numpy() - p1h.to_numpy()), axis=1)
+        s["disagreement_D_1m_1h"] = D
+
+        # Gates.
+        D0 = float(disagreement_penalty.get("D0", 0.15))
+        D1 = float(disagreement_penalty.get("D1", 0.35))
+        denom = max(D1 - D0, 1e-9)
+        s["G_dis"] = 1.0 - np.clip((D - D0) / denom, 0.0, 1.0)
+
+        d0 = float(stabilizer.get("Delta0", 0.10))
+        d1 = float(stabilizer.get("Delta1", 0.30))
+        denom = max(d1 - d0, 1e-9)
+        s["G_stab"] = 1.0 - np.clip((delta - d0) / denom, 0.0, 1.0)
+
+        out_frames.append(s)
+
+    return pd.concat(out_frames, ignore_index=True)
+
+
