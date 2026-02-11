@@ -235,7 +235,6 @@ class Forecaster:
                  enable_mc: bool = True,
                  enable_regime_gate: bool = True,
                  enable_hybrid_ml: bool = True,
-                 enable_auto_fix: bool = True):
                  enable_auto_fix: bool = True,
                  enable_particle_candles: bool = True,
                  enable_manifold_patterns: bool = True):

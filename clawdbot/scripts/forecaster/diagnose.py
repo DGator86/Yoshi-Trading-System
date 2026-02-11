@@ -317,7 +317,6 @@ def run_diagnosis(n_bars: int = 2000,
     gbm_samples = len(fc_gbm.meta_learner._history)
 
     if verbose:
-        print(f"  Hybrid ML: HR={metrics_gbm.hit_rate:.1%}, "
         print(f"  GBM: HR={metrics_gbm.hit_rate:.1%}, "
               f"MCC={metrics_gbm.mcc:.4f}, "
               f"trained={gbm_trained}, samples={gbm_samples}")
@@ -518,7 +517,6 @@ def run_diagnosis(n_bars: int = 2000,
         print(f"  Status: {auto_fix_report.verdict}")
         for action in auto_fix_report.actions_taken:
             print(f"  ACTION: {action}")
-            print(f"  GBM not trained (insufficient samples)")
 
     # ── VERDICT ───────────────────────────────────────────
     report.elapsed_s = time.time() - t0
@@ -730,7 +728,6 @@ def full_diagnostics_and_fix(
 def main():
     parser = argparse.ArgumentParser(
         description="Forecaster Diagnostic Suite (Ultimate Enhanced)")
-        description="Forecaster Diagnostic Suite (14-Paradigm)")
     parser.add_argument("--bars", type=int, default=2000)
     parser.add_argument("--forecasts", type=int, default=75)
     parser.add_argument("--json", action="store_true")

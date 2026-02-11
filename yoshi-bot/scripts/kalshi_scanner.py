@@ -26,7 +26,7 @@ from src.gnosis.quantum import PriceTimeManifold  # noqa: E402
 from src.gnosis.particle.quantum import QuantumPriceEngine # For param hot-reload
 from src.gnosis.utils.kalshi_client import KalshiClient  # noqa: E402
 import src.gnosis.utils.notifications as notify  # noqa: E402
-from src.gnosis.data.aggregator import DataSourceAggregator # Task 1
+from src.gnosis.ingest.data_aggregator import DataSourceAggregator
 
 # Load environment variables
 load_dotenv()
