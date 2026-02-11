@@ -203,6 +203,8 @@ class QuantumPriceEngine:
             # logic to update REGIME_PARAMS
             pass
 
+    def detect_market_regime(
+        self,
         df: pd.DataFrame,
         lookback: int = 120,
     ) -> MarketRegime:

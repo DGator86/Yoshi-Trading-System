@@ -1,9 +1,14 @@
 import os
 import requests
 from typing import Dict, Any, List, Optional
-from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    load_dotenv()
+except ImportError:
+    # dotenv is optional; environment variables may be provided by systemd/CI.
+    pass
 
 class DigitalOceanClient:
     """Simple client for DigitalOcean API (v2)."""
