@@ -380,8 +380,8 @@ SVCEOF
 ok "clawdbot.service (with auto-fix on boot)"
 
 # ── Kalshi Edge Scanner ──
-SCANNER_LOG="${YOSHI_DIR:-/root/Yoshi-Bot}/logs/scanner.log"
-mkdir -p "$(dirname "$SCANNER_LOG")" 2>/dev/null || true
+SIGNAL_QUEUE="${YOSHI_DIR:-/root/Yoshi-Bot}/data/signals/scanner_signals.jsonl"
+mkdir -p "$(dirname "$SIGNAL_QUEUE")" 2>/dev/null || true
 
 cat > /etc/systemd/system/kalshi-edge-scanner.service << SVCEOF
 [Unit]
@@ -420,7 +420,7 @@ ok "kalshi-edge-scanner.service"
 # ── Yoshi Bridge ──
 cat > /etc/systemd/system/yoshi-bridge.service << SVCEOF
 [Unit]
-Description=Yoshi Bridge — Scanner Log to Trading Core (Ultimate-Fix)
+Description=Yoshi Bridge — Structured Signals to Trading Core (Ultimate-Fix)
 After=network.target
 PartOf=clawdbot.service
 
@@ -433,7 +433,7 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=TRADING_CORE_URL=http://127.0.0.1:8000
 Environment=PYTHONPATH=$PROJECT_DIR
 
-ExecStart=/usr/bin/python3 $PROJECT_DIR/scripts/yoshi-bridge.py --poll-interval 30
+ExecStart=/usr/bin/python3 $PROJECT_DIR/scripts/yoshi-bridge.py --signal-path $SIGNAL_QUEUE --poll-interval 5 --min-edge 2.0
 Restart=always
 RestartSec=15
 StartLimitIntervalSec=600

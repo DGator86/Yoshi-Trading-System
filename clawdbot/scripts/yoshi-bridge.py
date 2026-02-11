@@ -1,238 +1,258 @@
 #!/usr/bin/env python3
-"""Yoshi-Bridge: Buffered Signal Forwarder.
+"""Yoshi bridge: structured signal queue -> Trading Core /propose.
 
-Polls Yoshi-Bot scanner logs and buffers signals before forwarding to Trading Core.
-Uses asyncio for concurrency and buffering.
-
-Architecture:
-  Log Watcher (Producer) -> asyncio.Queue -> Signal Processor (Consumer) -> HTTP POST
+Canonical runtime path:
+    kalshi_scanner.py --bridge  -> data/signals/scanner_signals.jsonl
+    yoshi-bridge.py             -> POST /propose
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import re
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 import aiohttp
 
-# Configure logging
+# Add monorepo root so shared schema module is importable.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from shared.trading_signals import (  # noqa: E402
+    SIGNAL_EVENTS_PATH_DEFAULT,
+    make_trade_signal,
+    parse_event_line,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("yoshi-bridge")
 
 TRADING_CORE_URL = os.getenv("TRADING_CORE_URL", "http://127.0.0.1:8000")
 
-# Patterns to extract signal data
-EDGE_PATTERN = re.compile(r"EDGE:\s*([+-]?\d+\.?\d*)%", re.IGNORECASE)
-SYMBOL_PATTERN = re.compile(r"\*?(BTC|ETH|SOL)USDT\*?", re.IGNORECASE)
-STRIKE_PATTERN = re.compile(r"Strike:.*?(?:Above|Below)?\s*\$?([\d,]+\.?\d*)", re.IGNORECASE)
-MODEL_PROB_PATTERN = re.compile(r"Model\s*Prob:\s*(\d+\.?\d*)%", re.IGNORECASE)
-MARKET_PROB_PATTERN = re.compile(r"Market\s*Prob:\s*(\d+\.?\d*)%", re.IGNORECASE)
-ACTION_PATTERN = re.compile(r"ACTION:\s*`?(BUY\s*(?:YES|NO)|NEUTRAL)`?", re.IGNORECASE)
-TIKCER_PATTERN = re.compile(r"Ticker:\s*(\S+)", re.IGNORECASE) # Guessing ticker pattern or extracting logic
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
-def parse_number(s: str) -> float:
-    return float(s.replace(",", ""))
-
-
-def parse_signal_block(block: str) -> dict | None:
-    """Parse a YOSHI KALSHI ALERT block from scanner log output."""
-    edge_match = EDGE_PATTERN.search(block)
-    if not edge_match:
-        return None
-
-    symbol_match = SYMBOL_PATTERN.search(block)
-    strike_match = STRIKE_PATTERN.search(block)
-    model_prob_match = MODEL_PROB_PATTERN.search(block)
-    market_prob_match = MARKET_PROB_PATTERN.search(block)
-    action_match = ACTION_PATTERN.search(block)
-    # Ticker usually not in log text explicitly unless added?
-    # New scanner emits json-like structure or just text.
-    # We'll try to find ticker if present, else None.
-    
-    signal = {
-        "edge": float(edge_match.group(1)),
-        "symbol": (f"{symbol_match.group(1).upper()}USDT"
-                   if symbol_match else "BTCUSDT"),
-        "timestamp": datetime.utcnow().isoformat(),
-        "ticker": None
-    }
-
-    if strike_match:
-        signal["strike"] = parse_number(strike_match.group(1))
-    if model_prob_match:
-        signal["model_prob"] = float(model_prob_match.group(1)) / 100
-    if market_prob_match:
-        signal["market_prob"] = float(market_prob_match.group(1)) / 100
-    if action_match:
-        raw_action = action_match.group(1).strip().upper().replace(" ", "_")
-        signal["action"] = raw_action
-
-    # If ticker isn't in log, we can't execute. signal['ticker'] is None.
-    # TradingCore requires ticker for execution.
-    # Current scanner log format does NOT include ticker clearly yet.
-    # Task 1 update to scanner included ticker in `opp`.
-    # Does `format_kalshi_report` include ticker?
-    # I didn't update `format_kalshi_report` to print ticker!
-    # I only updated the `payload` in `run_scan`.
-    # Wait, the bridge reads LOGS. `format_kalshi_report` writes logs.
-    # If `format_kalshi_report` doesn't write ticker, bridge can't see it.
-    # I MUST update `format_kalshi_report` in `kalshi_scanner.py` to print ticker.
-    
-    return signal
+_LEGACY_BLOCK_PATTERN = re.compile(
+    r"\*(?P<symbol>[A-Z0-9/_-]+)\*.*?"
+    r"Ticker:\s*(?P<ticker>[A-Z0-9_-]+).*?"
+    r"Strike:\s*\*Above\s*\$(?P<strike>[0-9,]+(?:\.[0-9]+)?)\*.*?"
+    r"Market Prob:\s*(?P<market_prob>-?[0-9]+(?:\.[0-9]+)?)%.*?"
+    r"Model Prob:\s*(?P<model_prob>-?[0-9]+(?:\.[0-9]+)?)%.*?"
+    r"EDGE:\s*(?P<edge>[+-]?[0-9]+(?:\.[0-9]+)?)%.*?"
+    r"ACTION:\s*`(?P<action>BUY YES|BUY NO|NEUTRAL)`",
+    re.DOTALL,
+)
 
 
 class Bridge:
-    def __init__(self, log_path: str, poll_interval: float, min_edge: float, dry_run: bool):
-        self.log_path = log_path
-        self.poll_interval = poll_interval
-        self.min_edge = min_edge
-        self.dry_run = dry_run
-        self.signal_queue = asyncio.Queue(maxsize=100)
-        self.cooldown_map = {}
-        self.cooldown_seconds = 300
+    """Consume structured scanner events and forward proposals to core."""
+
+    def __init__(
+        self,
+        signal_path: str,
+        poll_interval: float,
+        min_edge_pct: float,
+        dry_run: bool,
+        start_from_beginning: bool = False,
+    ):
+        self.signal_path = signal_path
+        self.poll_interval = float(poll_interval)
+        self.min_edge_pct = float(min_edge_pct)
+        self.dry_run = bool(dry_run)
+        self.start_from_beginning = bool(start_from_beginning)
+        self.legacy_mode = not str(signal_path).lower().endswith(".jsonl")
+
+        self.signal_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=512)
         self.last_position = 0
+        self._seen_idempotency: dict[str, float] = {}
+        self._seen_ttl_sec = 3600.0
+        self._legacy_buffer = ""
 
-    async def check_trading_core(self, session: aiohttp.ClientSession) -> bool:
-        try:
-            async with session.get(f"{TRADING_CORE_URL}/health", timeout=5) as resp:
-                return resp.status == 200
-        except Exception:
-            return False
+    def _should_skip_duplicate(self, idempotency_key: str) -> bool:
+        now = time.time()
+        # Opportunistic GC.
+        expired = [k for k, ts in self._seen_idempotency.items() if now - ts > self._seen_ttl_sec]
+        for k in expired:
+            self._seen_idempotency.pop(k, None)
 
-    async def log_watcher(self):
-        """Producer: Watches log file and enqueues signals."""
-        logger.info(f"Watching log: {self.log_path}")
-        
-        # Initial seek to end
-        if Path(self.log_path).exists():
-            self.last_position = Path(self.log_path).stat().st_size
-        
+        if idempotency_key in self._seen_idempotency:
+            return True
+        self._seen_idempotency[idempotency_key] = now
+        return False
+
+    def _read_signal_chunk(self) -> str:
+        path = Path(self.signal_path)
+        if not path.exists():
+            return ""
+        if path.stat().st_size < self.last_position:
+            # Rotated/truncated.
+            self.last_position = 0
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            handle.seek(self.last_position)
+            content = handle.read()
+            self.last_position = handle.tell()
+            return content
+
+    async def signal_watcher(self):
+        """Producer: read JSONL signal events and enqueue valid proposals."""
+        logger.info(
+            "watching_path path=%s mode=%s",
+            self.signal_path,
+            "legacy_log" if self.legacy_mode else "jsonl",
+        )
+
+        p = Path(self.signal_path)
+        if p.exists() and not self.start_from_beginning:
+            self.last_position = p.stat().st_size
+            logger.info("tail_mode enabled start_pos=%d", self.last_position)
+
         while True:
             try:
-                if not Path(self.log_path).exists():
-                    await asyncio.sleep(self.poll_interval)
-                    continue
-
-                # Check if rotated
-                if Path(self.log_path).stat().st_size < self.last_position:
-                    self.last_position = 0
-                
-                # Read new content
-                # Use run_in_executor for file I/O
                 loop = asyncio.get_running_loop()
-                new_content = await loop.run_in_executor(None, self._read_log_chunk)
-                
-                if new_content:
-                    blocks = re.split(r"={10,}", new_content)
-                    for block in blocks:
-                        if "EDGE" not in block:
-                            continue
-                        
-                        signal = parse_signal_block(block)
-                        if not signal:
-                            continue
-                        
-                        # Filter by edge
-                        if abs(signal["edge"]) < self.min_edge:
-                            continue
-                            
-                        # Filter by cooldown
-                        key = f"{signal['symbol']}:{signal.get('strike')}"
-                        last_sent = self.cooldown_map.get(key, 0)
-                        if time.time() - last_sent < self.cooldown_seconds:
-                            continue
-                            
-                        self.cooldown_map[key] = time.time()
-                        
-                        # Enqueue
-                        try:
-                            self.signal_queue.put_nowait(signal)
-                            logger.info(f"Queued signal: {signal['symbol']} {signal['action']} (Edge: {signal['edge']}%)")
-                        except asyncio.QueueFull:
-                            logger.warning("Queue full, dropping signal!")
-                            
-            except Exception as e:
-                logger.error(f"Watcher error: {e}")
-                
+                chunk = await loop.run_in_executor(None, self._read_signal_chunk)
+                if chunk:
+                    if self.legacy_mode:
+                        self._legacy_buffer += chunk
+                        matches = list(_LEGACY_BLOCK_PATTERN.finditer(self._legacy_buffer))
+                        for match in matches:
+                            gd = match.groupdict()
+                            action = "BUY_YES" if gd["action"] == "BUY YES" else "BUY_NO"
+                            signal = make_trade_signal(
+                                symbol=gd["symbol"],
+                                ticker=gd["ticker"],
+                                action=action,
+                                strike=float(gd["strike"].replace(",", "")),
+                                market_prob=_safe_float(gd["market_prob"], 50.0) / 100.0,
+                                model_prob=_safe_float(gd["model_prob"], 50.0) / 100.0,
+                                edge=_safe_float(gd["edge"], 0.0) / 100.0,
+                                source="yoshi_bridge_legacy_log",
+                            ).to_payload()
+                            await self._enqueue_signal(signal)
+                        if matches:
+                            self._legacy_buffer = self._legacy_buffer[matches[-1].end():]
+                        elif len(self._legacy_buffer) > 12000:
+                            self._legacy_buffer = self._legacy_buffer[-4000:]
+                    else:
+                        for raw_line in chunk.splitlines():
+                            event = parse_event_line(raw_line)
+                            if not event:
+                                continue
+                            await self._enqueue_signal(event["signal"])
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.exception("watcher_error err=%s", exc)
+
             await asyncio.sleep(self.poll_interval)
 
-    def _read_log_chunk(self) -> str:
+    async def _enqueue_signal(self, signal: dict):
+        edge = abs(_safe_float(signal.get("edge"), 0.0))
+        edge_pct = edge * 100.0
+        if edge_pct < self.min_edge_pct:
+            return
+        idk = str(signal.get("idempotency_key", ""))
+        if not idk:
+            logger.warning("drop_signal missing_idempotency signal_id=%s", signal.get("signal_id"))
+            return
+        if self._should_skip_duplicate(idk):
+            logger.info("skip_duplicate idempotency_key=%s", idk)
+            return
         try:
-            with open(self.log_path, "r", encoding="utf-8", errors="ignore") as f:
-                f.seek(self.last_position)
-                content = f.read()
-                self.last_position = f.tell()
-                return content
-        except Exception:
-            return ""
+            self.signal_queue.put_nowait(signal)
+            logger.info(
+                "signal_queued signal_id=%s idempotency_key=%s edge_pct=%.2f",
+                signal.get("signal_id"),
+                idk,
+                edge_pct,
+            )
+        except asyncio.QueueFull:
+            logger.warning("queue_full dropping signal_id=%s", signal.get("signal_id"))
 
     async def signal_processor(self):
-        """Consumer: Dequeues signals and sends to Trading Core."""
+        """Consumer: POST queued proposals to Trading Core."""
         async with aiohttp.ClientSession() as session:
             while True:
+                signal = await self.signal_queue.get()
                 try:
-                    signal = await self.signal_queue.get()
-                    
+                    payload = {
+                        "symbol": signal.get("symbol"),
+                        "ticker": signal.get("ticker"),
+                        "action": signal.get("action"),
+                        "strike": _safe_float(signal.get("strike"), 0.0),
+                        "market_prob": _safe_float(signal.get("market_prob"), 0.5),
+                        "model_prob": _safe_float(signal.get("model_prob"), 0.5),
+                        "edge": _safe_float(signal.get("edge"), 0.0),
+                        "idempotency_key": signal.get("idempotency_key"),
+                        "signal_id": signal.get("signal_id"),
+                        "source": signal.get("source", "yoshi_bridge"),
+                        "created_at": signal.get("created_at"),
+                    }
                     if self.dry_run:
-                        logger.info(f"[DRY RUN] Would propose: {signal}")
+                        logger.info(
+                            "dry_run_propose signal_id=%s idempotency_key=%s",
+                            payload.get("signal_id"),
+                            payload.get("idempotency_key"),
+                        )
                     else:
-                        # Send to Trading Core
-                        payload = {
-                            "symbol": signal["symbol"],
-                            "action": signal["action"],
-                            "strike": signal.get("strike", 0.0),
-                            "ticker": signal.get("ticker"), # Might be None
-                            "market_prob": signal.get("market_prob", 0.5),
-                            "model_prob": signal.get("model_prob", 0.5),
-                            "edge": signal["edge"] / 100.0
-                        }
-                        
                         url = f"{TRADING_CORE_URL}/propose"
-                        try:
-                            async with session.post(url, json=payload, timeout=10) as resp:
-                                if resp.status == 200:
-                                    res_json = await resp.json()
-                                    logger.info(f"Proposed successfully: {res_json}")
-                                else:
-                                    logger.error(f"Proposal failed: {resp.status}")
-                        except Exception as e:
-                            logger.error(f"Connection error to Trading Core: {e}")
-                    
+                        async with session.post(url, json=payload, timeout=10) as resp:
+                            body = await resp.text()
+                            if resp.status == 200:
+                                logger.info(
+                                    "proposal_ok status=%d signal_id=%s idempotency_key=%s",
+                                    resp.status,
+                                    payload.get("signal_id"),
+                                    payload.get("idempotency_key"),
+                                )
+                            else:
+                                logger.error(
+                                    "proposal_failed status=%d signal_id=%s body=%s",
+                                    resp.status,
+                                    payload.get("signal_id"),
+                                    body[:500],
+                                )
+                except Exception as exc:  # pylint: disable=broad-except
+                    logger.exception("processor_error signal_id=%s err=%s", signal.get("signal_id"), exc)
+                finally:
                     self.signal_queue.task_done()
-                    
-                except Exception as e:
-                    logger.error(f"Processor error: {e}")
 
 
 async def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--log-path", default="scanner.log")
+    parser = argparse.ArgumentParser(description="Structured signal bridge")
+    parser.add_argument("--signal-path", default=SIGNAL_EVENTS_PATH_DEFAULT)
+    parser.add_argument("--log-path", default=None, help="Backward-compatible alias for --signal-path")
     parser.add_argument("--poll-interval", type=float, default=2.0)
-    parser.add_argument("--min-edge", type=float, default=2.0)
+    parser.add_argument("--min-edge", type=float, default=2.0, help="Min edge in percent")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--from-start", action="store_true", help="Process existing file from byte 0")
     args = parser.parse_args()
-    
-    bridge = Bridge(args.log_path, args.poll_interval, args.min_edge, args.dry_run)
-    
-    # Run producer and consumer concurrently
-    await asyncio.gather(
-        bridge.log_watcher(),
-        bridge.signal_processor()
+    selected_path = args.log_path or args.signal_path
+
+    bridge = Bridge(
+        signal_path=selected_path,
+        poll_interval=args.poll_interval,
+        min_edge_pct=args.min_edge,
+        dry_run=args.dry_run,
+        start_from_beginning=args.from_start,
     )
+
+    await asyncio.gather(bridge.signal_watcher(), bridge.signal_processor())
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+

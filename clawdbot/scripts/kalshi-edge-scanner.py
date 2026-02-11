@@ -47,6 +47,10 @@ from urllib import request, error as urlerror, parse as urlparse
 
 from kalshi_client import KalshiClient
 
+# Monorepo root for shared trade schema.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from shared.trading_signals import make_trade_signal  # noqa: E402
+
 # ── Config ───────────────────────────────────────────────
 TRADING_CORE_URL = os.getenv("TRADING_CORE_URL", "http://127.0.0.1:8000")
 STATE_DIR = Path(__file__).parent.parent  # ClawdBot-V1 root
@@ -544,13 +548,20 @@ def propose_to_core(pick: dict) -> dict | None:
                 return None
 
         symbol = SYMBOL_MAP.get(pick["series"], "BTCUSDT")
-        payload = {
-            "exchange": "kalshi",
-            "symbol": symbol,
-            "side": "buy",
-            "type": "market",
-            "amount": pick["suggested_contracts"],
-        }
+        model_prob = float(pick.get("model_prob", 0.5))
+        market_prob = float(pick.get("market_prob", 0.5))
+        action = "BUY_YES" if model_prob >= market_prob else "BUY_NO"
+        signal = make_trade_signal(
+            symbol=symbol,
+            ticker=str(pick.get("ticker", "")),
+            action=action,
+            strike=float(pick.get("strike", 0.0)),
+            market_prob=market_prob,
+            model_prob=model_prob,
+            edge=model_prob - market_prob,
+            source="kalshi_edge_scanner",
+        )
+        payload = signal.to_payload()
         body = json.dumps(payload).encode()
         req = request.Request(
             f"{TRADING_CORE_URL}/propose",

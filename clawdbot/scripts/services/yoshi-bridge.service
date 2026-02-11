@@ -1,5 +1,5 @@
 [Unit]
-Description=Yoshi Bridge — Scanner Log to Trading Core
+Description=Yoshi Bridge — Structured signals to Trading Core
 After=network.target
 PartOf=clawdbot.service
 
@@ -11,8 +11,8 @@ EnvironmentFile=-/root/ClawdBot-V1/.env
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=TRADING_CORE_URL=http://127.0.0.1:8000
 
-# Bridge watches scanner logs and forwards to Trading Core /propose
-ExecStart=/usr/bin/python3 scripts/yoshi-bridge.py --poll-interval 30
+# Bridge watches structured signal queue and forwards to Trading Core /propose
+ExecStart=/usr/bin/python3 scripts/yoshi-bridge.py --signal-path /root/Yoshi-Bot/data/signals/scanner_signals.jsonl --poll-interval 5 --min-edge 2.0
 
 Restart=always
 RestartSec=15

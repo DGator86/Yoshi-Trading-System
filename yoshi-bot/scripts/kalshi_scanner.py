@@ -15,18 +15,25 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-import requests
 from dotenv import load_dotenv
 
 # Add project root to path BEFORE importing local modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add monorepo root for shared runtime schema imports
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.evaluate_manifold import prints_to_ohlcv  # noqa: E402
 from src.gnosis.quantum import PriceTimeManifold  # noqa: E402
-from src.gnosis.particle.quantum import QuantumPriceEngine # For param hot-reload
+from src.gnosis.particle.quantum import QuantumPriceEngine
 from src.gnosis.utils.kalshi_client import KalshiClient  # noqa: E402
 import src.gnosis.utils.notifications as notify  # noqa: E402
 from src.gnosis.ingest.data_aggregator import DataSourceAggregator
+from shared.trading_signals import (  # noqa: E402
+    SIGNAL_EVENTS_PATH_DEFAULT,
+    append_event_jsonl,
+    make_trade_signal,
+    wrap_signal_event,
+)
 
 # Load environment variables
 load_dotenv()
@@ -143,6 +150,33 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
         return []
 
     timeframes = [5, 15, 30, 60]
+    manifold_by_tf: list[tuple[int, PriceTimeManifold]] = []
+
+    # Build one manifold per timeframe and reuse across all strike checks.
+    for tf in timeframes:
+        agg_dict = {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+        if "buy_volume" in ohlcv_1m.columns:
+            agg_dict["buy_volume"] = "sum"
+        if "sell_volume" in ohlcv_1m.columns:
+            agg_dict["sell_volume"] = "sum"
+
+        tf_df = ohlcv_1m.resample(f"{tf}min", on="timestamp").agg(agg_dict).dropna().reset_index()
+        if tf_df.empty:
+            continue
+        manifold = PriceTimeManifold()
+        manifold.fit_from_1m_bars(tf_df)
+        manifold_by_tf.append((tf, manifold))
+
+    if not manifold_by_tf:
+        logger.warning("No valid timeframe manifolds for %s", symbol)
+        return []
+
     opportunities = []
 
     # 2. Iterate through Kalshi strikes and find edges
@@ -183,33 +217,11 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
         agg_probs = []
         medians = []
 
-        for tf in timeframes:
-            # Dynamically build aggregation dict based on available columns
-            agg_dict = {
-                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last',
-                'volume': 'sum'
-            }
-            if 'buy_volume' in ohlcv_1m.columns:
-                agg_dict['buy_volume'] = 'sum'
-            if 'sell_volume' in ohlcv_1m.columns:
-                agg_dict['sell_volume'] = 'sum'
-
-            tf_df = ohlcv_1m.resample(f'{tf}min', on='timestamp').agg(
-                agg_dict
-            ).dropna().reset_index()
-
-            manifold = PriceTimeManifold()
-            # Note: Parameter hot-reload affects QuantumPriceEngine physics.
-            # PriceTimeManifold (wavefunction dynamics) might need separate linkage 
-            # if we want Ralph to optimize it too. For now, we assume QuantumPriceEngine 
-            # is the primary target for Ralph's optimization loop (physics params).
-            
-            manifold.fit_from_1m_bars(tf_df)
-
+        for tf, manifold in manifold_by_tf:
             h_bars = max(1, 60 // tf)
             res = manifold.predict_binary_market(strike, h_bars, n_sims=2000)
-            agg_probs.append(res['prob'])
-            medians.append(res['median'])
+            agg_probs.append(res["prob"])
+            medians.append(res["median"])
 
         final_prob = sum(agg_probs) / len(agg_probs)
         final_median = sum(medians) / len(medians)
@@ -240,6 +252,44 @@ async def data_loop(aggregator: DataSourceAggregator, symbols: list[str], interv
         await asyncio.sleep(interval)
 
 
+def emit_structured_signals(opportunities: list[dict], signal_path: str) -> int:
+    """Emit scanner opportunities to JSONL events for yoshi-bridge."""
+    emitted = 0
+    for opp in opportunities:
+        edge = float(opp["model_prob"] - opp["market_prob"])
+        action = (
+            "BUY_YES"
+            if edge > 0.05
+            else "BUY_NO"
+            if edge < -0.05
+            else "NEUTRAL"
+        )
+        if action == "NEUTRAL":
+            continue
+        signal = make_trade_signal(
+            symbol=opp["symbol"],
+            ticker=opp["ticker"],
+            action=action,
+            strike=float(opp["strike"]),
+            market_prob=float(opp["market_prob"]),
+            model_prob=float(opp["model_prob"]),
+            edge=edge,
+            source="kalshi_scanner",
+        )
+        event = wrap_signal_event(signal)
+        append_event_jsonl(signal_path, event)
+        emitted += 1
+        logger.info(
+            "signal_emitted signal_id=%s idempotency_key=%s symbol=%s action=%s edge=%.4f",
+            signal.signal_id,
+            signal.idempotency_key,
+            signal.symbol,
+            signal.action,
+            signal.edge,
+        )
+    return emitted
+
+
 async def main():
     """Main entry point for the Kalshi Scanner."""
     parser = argparse.ArgumentParser(description="Kalshi Bot Scanner")
@@ -255,7 +305,13 @@ async def main():
     parser.add_argument("--exchange", type=str, default="kraken",
                         help="Deprecated: Exchange ID (now handled by aggregator)")
     parser.add_argument("--bridge", action="store_true",
-                        help="Send opportunities to Trading Core API")
+                        help="Emit structured signals for yoshi-bridge")
+    parser.add_argument(
+        "--signal-path",
+        type=str,
+        default=SIGNAL_EVENTS_PATH_DEFAULT,
+        help=f"Structured signal JSONL path (default: {SIGNAL_EVENTS_PATH_DEFAULT})",
+    )
     args = parser.parse_args()
 
     data_path = "data/large_history/prints.parquet"
@@ -333,44 +389,10 @@ async def main():
             logger.info("Found %d opportunities!", len(opps))
             report = format_kalshi_report(opps)
 
-            # Bridge to Trading Core
+            # Emit structured events for yoshi-bridge (single ingestion path)
             if args.bridge:
-                for opp in opps:
-                    edge = opp['model_prob'] - opp['market_prob']
-                    action = ("BUY_YES" if edge > 0.05 else "BUY_NO"
-                              if edge < -0.05 else "NEUTRAL")
-
-                    if action != "NEUTRAL":
-                        payload = {
-                            "symbol": opp['symbol'],
-                            "ticker": opp['ticker'],
-                            "action": action,
-                            "strike": float(opp['strike']),
-                            "market_prob": float(opp['market_prob']),
-                            "model_prob": float(opp['model_prob']),
-                            "edge": float(edge)
-                        }
-                        try:
-                            # Note: requests is sync, blocking the loop briefly. 
-                            # Ideally use aiohttp, but keeping legacy bridge logic for now 
-                            # as user instructions focused on data layer.
-                            resp = requests.post(
-                                "http://127.0.0.1:8000/propose",
-                                json=payload,
-                                timeout=5
-                            )
-                            if resp.status_code == 200:
-                                logger.info(
-                                    "Bridged %s for %s to Trading Core",
-                                    action, opp['symbol']
-                                )
-                            else:
-                                logger.error(
-                                    "Bridge failed: %d",
-                                    resp.status_code
-                                )
-                        except Exception as e:  # pylint: disable=broad-except
-                            logger.error("Bridge connection error: %s", e)
+                emitted = emit_structured_signals(opps, args.signal_path)
+                logger.info("bridge_emit_complete count=%d path=%s", emitted, args.signal_path)
 
             # Check cooldown
             if time.time() - last_alert_time > cooldown:

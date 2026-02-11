@@ -83,8 +83,8 @@ Located in `/clawdbot`, this handles user interaction and deployment.
   * Manages the background loop, ensuring scans happen at correct intervals.
   * Routes alerts to Telegram.
 * **Bridge**:
-  * Parses the `scanner.log` and `value_plays` from Yoshi-Bot.
-  * Formats them into structured trade proposals for the Trading Core.
+  * Consumes structured scanner signal events from `data/signals/scanner_signals.jsonl`.
+  * Forwards normalized, idempotent trade proposals to the Trading Core.
 
 ---
 
@@ -126,7 +126,7 @@ Located in `/clawdbot`, this handles user interaction and deployment.
 | Script | Description |
 | :--- | :--- |
 | **`telegram-bot.py`** | **The Voice.** Connects to Telegram to send alerts and receive your commands. |
-| **`yoshi-bridge.py`** | **The Nervous System.** Reads the scanner's logs and pushes trade signals to the Trading Core. |
+| **`yoshi-bridge.py`** | **The Nervous System.** Reads structured scanner signal events and pushes idempotent proposals to Trading Core. |
 | **`deploy-ultimate-fix.sh`** | **The Mechanic.** A comprehensive script to fix deployment issues on the VPS. |
 
 **Directory Structure:**

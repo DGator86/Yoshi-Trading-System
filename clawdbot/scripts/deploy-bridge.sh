@@ -244,8 +244,8 @@ fi
 # ------- 6. Install yoshi-bridge systemd service -------
 echo -e "\n${YELLOW}[6/8] Installing yoshi-bridge service...${NC}"
 
-SCANNER_LOG="$YOSHI_DIR/logs/scanner.log"
-mkdir -p "$YOSHI_DIR/logs"
+SIGNAL_QUEUE="$YOSHI_DIR/data/signals/scanner_signals.jsonl"
+mkdir -p "$YOSHI_DIR/data/signals"
 
 cat > /etc/systemd/system/yoshi-bridge.service << EOF
 [Unit]
@@ -257,7 +257,7 @@ Wants=clawdbot.service
 Type=simple
 User=root
 WorkingDirectory=$CLAWDBOT_DIR
-ExecStart=/usr/bin/python3 $CLAWDBOT_DIR/scripts/yoshi-bridge.py --log-path $SCANNER_LOG --poll-interval 30 --min-edge 5.0
+ExecStart=/usr/bin/python3 $CLAWDBOT_DIR/scripts/yoshi-bridge.py --signal-path $SIGNAL_QUEUE --poll-interval 5 --min-edge 2.0
 Restart=always
 RestartSec=15
 StandardOutput=journal
@@ -333,7 +333,7 @@ echo "  curl -s http://127.0.0.1:8000/status # Yoshi Trading Core"
 echo "  moltbot status                       # Moltbot status"
 echo ""
 echo -e "${CYAN}Architecture:${NC}"
-echo "  Yoshi Scanner -> scanner.log -> yoshi-bridge -> Trading Core :8000 /propose"
+echo "  Yoshi Scanner -> data/signals/scanner_signals.jsonl -> yoshi-bridge -> Trading Core :8000 /propose"
 echo "  ClawdBot (moltbot :18789) -> reads Trading Core :8000 -> Telegram suggestions"
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"

@@ -12,11 +12,11 @@ kalshi_scanner.py (loop)              moltbot gateway :18789
   | Fetches OHLCV data                  | yoshi-trading skill
   | Runs PriceTimeManifold              | Reads Trading Core API
   | Finds Kalshi edge opportunities     | Formats trade suggestions
-  | Writes to scanner.log               | Sends to Telegram
+  | Writes structured signal events     | Sends to Telegram
   v                                     v
 yoshi-bridge.py                       You (Telegram)
-  | Watches scanner.log                 | "What's Yoshi's status?"
-  | Parses signals (edge, strike, etc)  | "Show me positions"
+  | Watches scanner_signals.jsonl       | "What's Yoshi's status?"
+  | Parses structured signal payloads   | "Show me positions"
   | POSTs to Trading Core /propose      | "approve" / "pass"
   v                                     |
 Trading Core API :8000  <---------------+
@@ -69,7 +69,7 @@ chmod +x scripts/deploy-bridge.sh
 
 This installs and starts:
 - **clawdbot** service (moltbot gateway + Telegram + yoshi-trading skill)
-- **yoshi-bridge** service (scanner log watcher -> Trading Core /propose)
+- **yoshi-bridge** service (structured signal queue -> Trading Core /propose)
 
 The deploy script will also prompt for Kalshi API credentials if not already configured.
 
@@ -89,7 +89,7 @@ Open Telegram and message your bot:
 |---------|------|-------------|
 | Yoshi Trading Core | 8000 | FastAPI order management, positions, risk controls |
 | ClawdBot Gateway | 18789 | Moltbot AI gateway + Telegram channel |
-| Yoshi Bridge | — | Log watcher, forwards scanner signals to Trading Core |
+| Yoshi Bridge | — | Structured signal bridge, forwards proposals to Trading Core |
 | Kalshi Scanner | — | Background signal engine (part of Yoshi-Bot) |
 | Kalshi API | — | Prediction market data (RSA-PSS V2 auth) |
 
@@ -139,7 +139,7 @@ Open Telegram and message your bot:
 The `skills/yoshi-trading/SKILL.md` teaches ClawdBot how to:
 - Query Yoshi's Trading Core API (status, positions, health)
 - Query Kalshi markets directly (exchange status, active markets, series)
-- Parse Kalshi scanner signals from logs
+- Parse Kalshi scanner signals from structured event queue
 - Propose and approve trades through the Trading Core
 - Manage risk controls (pause, resume, flatten, kill switch)
 - Format Kalshi suggestions with edge %, strike, and action
@@ -151,7 +151,7 @@ ClawdBot connects to Kalshi prediction markets through Yoshi-Bot's signal engine
 ### How It Works
 
 1. **Yoshi-Bot** (`kalshi_scanner.py`) continuously scans Kalshi crypto markets (KXBTC, KXETH) for mispriced opportunities using the Price-Time Manifold model with Monte Carlo simulations (2000 sims per timeframe).
-2. **Yoshi-Bridge** (`yoshi-bridge.py`) watches the scanner log and forwards qualifying signals (edge >= 5%) to the Trading Core `/propose` endpoint.
+2. **Yoshi-Bridge** (`yoshi-bridge.py`) watches `data/signals/scanner_signals.jsonl` and forwards qualifying signals to the Trading Core `/propose` endpoint.
 3. **ClawdBot** reads the Trading Core API and presents actionable Kalshi suggestions via Telegram, complete with edge %, strike, probability, and recommended action.
 4. **You** review and approve/reject trades via Telegram.
 

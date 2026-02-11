@@ -460,8 +460,8 @@ ok "~/.clawdbot/moltbot.json (token: ${GATEWAY_TOKEN:0:8}...)"
 # ================================================================
 step 8 "Services"
 
-SCANNER_LOG="$YOSHI_DIR/logs/scanner.log"
-mkdir -p "$YOSHI_DIR/logs" 2>/dev/null || true
+SIGNAL_QUEUE="$YOSHI_DIR/data/signals/scanner_signals.jsonl"
+mkdir -p "$YOSHI_DIR/data/signals" 2>/dev/null || true
 
 # Find moltbot binary path
 MOLTBOT_BIN=$(which moltbot 2>/dev/null || echo "/usr/bin/moltbot")
@@ -531,7 +531,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$CLAWDBOT_DIR
-ExecStart=/usr/bin/python3 $CLAWDBOT_DIR/scripts/yoshi-bridge.py --log-path $SCANNER_LOG --poll-interval 30 --min-edge 5.0
+ExecStart=/usr/bin/python3 $CLAWDBOT_DIR/scripts/yoshi-bridge.py --signal-path $SIGNAL_QUEUE --poll-interval 5 --min-edge 2.0
 Restart=always
 RestartSec=15
 StandardOutput=journal
