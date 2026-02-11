@@ -1,0 +1,89 @@
+system:
+  base_timeframe: 1m
+  symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+  instrument: perp   # spot | perp (simulation allows shorts only for perp)
+  venue: binanceusdm  # ccxt exchange id (e.g. binance, binanceusdm, bybit)
+
+regimes:
+  labels: [MR, TR, CP, EX, LQ]
+  classifier:
+    type: rules_softmax
+    beta: 3.0
+    thresholds:
+      liquidation:
+        tr_shock: 2.5
+        volume_impulse: 2.0
+        shock_score: 2.5
+        wick_ratio: 0.45
+      expansion:
+        tr_shock: 1.8
+        volume_impulse: 1.5
+
+playbooks:
+  - id: mr_fade
+    outputs: [s, q, u]
+  - id: trend_follow
+    outputs: [s, q, u]
+  - id: breakout_transition
+    outputs: [s, q, u]
+  - id: panic_only
+    outputs: [s, q, u]
+
+blending:
+  horizon_mix:
+    enabled: true
+    lambdas: { "1m": 0.40, "15m": 0.30, "1h": 0.20, "4h": 0.10 }
+    disagreement_penalty: { D0: 0.15, D1: 0.35 }
+  playbook_weights:  # W[r,k] priors; per-block learning adapts these in train
+    MR: { mr_fade: 1.0, trend_follow: 0.2, breakout_transition: 0.2, panic_only: 0.0 }
+    TR: { mr_fade: 0.2, trend_follow: 1.0, breakout_transition: 0.6, panic_only: 0.0 }
+    CP: { mr_fade: 0.2, trend_follow: 0.2, breakout_transition: 0.5, panic_only: 0.0 }
+    EX: { mr_fade: 0.1, trend_follow: 0.6, breakout_transition: 0.4, panic_only: 0.0 }
+    LQ: { mr_fade: 0.0, trend_follow: 0.0, breakout_transition: 0.0, panic_only: 1.0 }
+  transition:
+    stabilizer: { Delta0: 0.10, Delta1: 0.30 }
+
+risk:
+  initial_capital: 10000.0
+  position_size_pct: 0.15
+  entry_threshold: 0.12
+  permission:  # P_trade[r]
+    MR: 1.0
+    TR: 1.0
+    CP: 0.2
+    EX: 0.5
+    LQ: 0.0
+  min_permission: 0.35
+  thresholds_by_regime:  # θ_r examples
+    stop_atr_mult: { MR: 1.2, TR: 1.8, CP: 1.5, EX: 2.2, LQ: 3.0 }
+    takeprofit_atr_mult: { MR: 0.9, TR: 2.4, CP: 1.2, EX: 2.8, LQ: 0.0 }
+
+execution:
+  model: next_bar_open
+  fees:
+    taker_bps: 4.0
+    maker_bps: 2.0
+  slippage:
+    k_spread: 0.35
+    k_vol: 0.15
+    regime_multiplier: { MR: 1.0, TR: 1.1, CP: 1.0, EX: 1.7, LQ: 2.8 }
+    liquidity_overlay_multiplier: { TD: 0.8, NR: 1.0, TH: 1.6 }
+
+walkforward:
+  train_days: 180
+  test_days: 30
+  roll_days: 30
+  regime_coverage:
+    min_train_share:
+      LQ: 0.005
+      EX: 0.02
+    shift_flag_rules:
+      max_js_divergence: 0.15
+      test_vs_train_factor: 4.0
+  reporting:
+    by_regime: true
+    by_transition: true
+    cost_stress_tests:
+      - { fee_mult: 1.25, slip_mult: 1.25 }
+      - { fee_mult: 1.50, slip_mult: 2.00 }
+
