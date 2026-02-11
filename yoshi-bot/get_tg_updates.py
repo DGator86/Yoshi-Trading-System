@@ -1,8 +1,14 @@
 import subprocess
 import json
+import os
 
-token = '8501633363:AAHaBepg65Uu-pKjZhFD1zOuiHV_zypGVQY'
-vps_ip = "165.245.140.115"
+token = os.getenv("TELEGRAM_BOT_TOKEN")
+vps_ip = os.getenv("VPS_IP")
+
+if not token:
+    raise SystemExit("TELEGRAM_BOT_TOKEN is not set.")
+if not vps_ip:
+    raise SystemExit("VPS_IP is not set.")
 
 # Using curl avoids python One-Liner quoting hell in SSH
 # -s for silent (no progress bar), -S to show errors

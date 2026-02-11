@@ -1,11 +1,18 @@
+import os
+
 import requests
 
-token = '8501633363:AAHaBepg65Uu-pKjZhFD1zOuiHV_zypGVQY'
-url = f'https://api.telegram.org/bot{token}/getMe'
+token = os.getenv("TELEGRAM_BOT_TOKEN")
+if not token:
+    print("TELEGRAM_BOT_TOKEN is not set. Export it first.")
+    raise SystemExit(1)
+
+url = f"https://api.telegram.org/bot{token}/getMe"
 
 try:
-    response = requests.get(url)
+    response = requests.get(url, timeout=20)
     print(f"Status Code: {response.status_code}")
     print(f"Response: {response.text}")
-except Exception as e:
-    print(f"Error: {e}")
+except Exception as exc:
+    print(f"Error: {exc}")
+    raise SystemExit(1)

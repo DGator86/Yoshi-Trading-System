@@ -34,6 +34,17 @@ python scripts/fetch_coingecko_data.py --symbols BTCUSDT ETHUSDT --days 30
 
 Supported symbols: BTCUSDT, ETHUSDT, SOLUSDT
 
+## Secrets & Credential Hygiene
+
+All credentials must be provided via environment variables only.
+
+- Setup guide:
+  - [docs/secrets-and-credentials.md](docs/secrets-and-credentials.md)
+- Copy template:
+  - `cp .env.example .env`
+
+If any key has been exposed in chat/logs, rotate it immediately before use.
+
 ## Continuous Crypto Source Scanner
 
 The repository now includes a persistent source scanner that continuously polls

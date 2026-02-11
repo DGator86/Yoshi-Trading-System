@@ -56,8 +56,9 @@ def test_coingecko():
     print("=" * 50)
 
     try:
-        # Use API key if available
-        api_key = os.getenv("COINGECKO_API_KEY", "CG-krJCp3qpAfGUnTb5qDXezUzz")
+        # Use API key from environment if available.
+        # CoinGecko public endpoints may still work without one.
+        api_key = os.getenv("COINGECKO_API_KEY")
         config = ProviderConfig(api_key=api_key)
         provider = CoinGeckoProvider(config)
 
@@ -85,7 +86,7 @@ def test_coinmarketcap():
     print("Testing CoinMarketCap Provider")
     print("=" * 50)
 
-    api_key = os.getenv("COINMARKETCAP_API_KEY", "6a9f693f30a7490dacf1863990b94fc9")
+    api_key = os.getenv("COINMARKETCAP_API_KEY")
     if not api_key:
         print("  Skipping: No API key configured")
         return True
@@ -143,8 +144,8 @@ def test_unified_fetcher():
 
     try:
         fetcher = UnifiedDataFetcher(
-            coingecko_key=os.getenv("COINGECKO_API_KEY", "CG-krJCp3qpAfGUnTb5qDXezUzz"),
-            coinmarketcap_key=os.getenv("COINMARKETCAP_API_KEY", "6a9f693f30a7490dacf1863990b94fc9"),
+            coingecko_key=os.getenv("COINGECKO_API_KEY"),
+            coinmarketcap_key=os.getenv("COINMARKETCAP_API_KEY"),
         )
 
         print(f"\nAvailable providers: {fetcher.list_providers()}")
