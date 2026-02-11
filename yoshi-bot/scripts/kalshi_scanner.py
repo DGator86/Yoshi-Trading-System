@@ -26,7 +26,7 @@ from src.gnosis.quantum import PriceTimeManifold  # noqa: E402
 from src.gnosis.particle.quantum import QuantumPriceEngine # For param hot-reload
 from src.gnosis.utils.kalshi_client import KalshiClient  # noqa: E402
 import src.gnosis.utils.notifications as notify  # noqa: E402
-from src.gnosis.data.aggregator import DataSourceAggregator # Task 1
+from src.gnosis.ingest.ohlcv_aggregator import DataSourceAggregator  # Task 1
 
 # Load environment variables
 load_dotenv()
@@ -263,7 +263,13 @@ async def main():
     cooldown = 3600  # 1 hour cooldown per alert
 
     # Task 1: Initialize Aggregator
-    aggregator = DataSourceAggregator()
+    aggregator = DataSourceAggregator(
+        exchange=args.exchange,
+        timeframe="1m",
+        limit=1500,
+        rate_limit_ms=250,
+        stale_after_sec=180,
+    )
     
     # Task 4: Initialize Quantum Engine for Param Hot-Reload
     quantum_engine = QuantumPriceEngine()
@@ -286,14 +292,21 @@ async def main():
         live_data = None
         if args.live:
             # Task 1: Use aggregator cache instead of direct fetch
-            snapshot = aggregator.get_latest()
+            snapshot = aggregator.get_latest(max_age_sec=300)
             if snapshot and args.symbol in snapshot.get("symbols", {}):
                 s_data = snapshot["symbols"][args.symbol]
+                if s_data.get("is_stale", True):
+                    logger.warning(
+                        "Live cache stale for %s (age=%ss).",
+                        args.symbol,
+                        s_data.get("age_sec"),
+                    )
+                    s_data = None
                 
                 # Convert list of dicts to DataFrame
                 # s_data["ohlcv"] is list of dicts [timestamp, open, high, low, close, volume]
                 try:
-                    df = pd.DataFrame(s_data["ohlcv"])
+                    df = pd.DataFrame((s_data or {}).get("ohlcv") or [])
                     if not df.empty:
                         # Ensure timestamp is datetime
                         if pd.api.types.is_numeric_dtype(df["timestamp"]):
