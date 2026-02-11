@@ -302,7 +302,17 @@ class TradingState:
 
 store = SqliteStore(DB_PATH)
 state = TradingState(store)
-kalshi = KalshiClient()
+
+
+def _build_kalshi_client() -> Optional[KalshiClient]:
+    try:
+        return KalshiClient()
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("kalshi_client_unavailable err=%s", exc)
+        return None
+
+
+kalshi = _build_kalshi_client()
 
 
 def on_breaker_trip(failure_count: int):
@@ -440,6 +450,10 @@ async def propose_trade(proposal: TradeProposal) -> Dict[str, Any]:
         return resp
 
     side = "no" if "NO" in payload["action"] else "yes"
+    if kalshi is None:
+        resp = _response(False, "Kalshi client unavailable; check API credentials.")
+        store.upsert_proposal(proposal_id, idempotency_key, "execution_unavailable", payload, resp)
+        return resp
 
     try:
         loop = asyncio.get_running_loop()

@@ -23,10 +23,14 @@ def _load_core(monkeypatch, tmp_path):
     import src.gnosis.execution.trading_core as trading_core  # noqa: E402
 
     trading_core = importlib.reload(trading_core)
-    trading_core.kalshi.place_order = lambda **kwargs: {  # type: ignore[assignment]
-        "order_id": f"ord-{kwargs.get('client_order_id', 'x')}",
-        "ticker": kwargs.get("ticker"),
-    }
+    class _StubKalshi:
+        def place_order(self, **kwargs):
+            return {
+                "order_id": f"ord-{kwargs.get('client_order_id', 'x')}",
+                "ticker": kwargs.get("ticker"),
+            }
+
+    trading_core.kalshi = _StubKalshi()
     return trading_core
 
 
