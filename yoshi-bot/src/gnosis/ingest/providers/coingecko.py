@@ -174,6 +174,21 @@ class CoinGeckoProvider(DataProvider):
         except Exception:
             self._coin_list_cache = {}
 
+    @staticmethod
+    def _coerce_ohlc_days(days: int) -> int:
+        """Map arbitrary day windows to CoinGecko-supported OHLC day buckets."""
+        supported = (1, 7, 14, 30, 90, 180, 365)
+        try:
+            d = int(days)
+        except (TypeError, ValueError):
+            return 30
+        if d <= supported[0]:
+            return supported[0]
+        for v in supported:
+            if d <= v:
+                return v
+        return supported[-1]
+
     def fetch_ohlcv(
         self,
         symbol: str,
@@ -211,9 +226,10 @@ class CoinGeckoProvider(DataProvider):
                 days = 30
 
         # CoinGecko OHLC endpoint
+        ohlc_days = self._coerce_ohlc_days(days)
         params = {
             "vs_currency": "usd",
-            "days": str(days),
+            "days": str(ohlc_days),
         }
 
         try:

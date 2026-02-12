@@ -16,6 +16,27 @@ import requests
 from .base import DataProvider, ProviderConfig
 
 
+def _epoch_to_datetime_utc(values: pd.Series) -> pd.Series:
+    """Convert integer epoch timestamps with dynamic unit detection.
+
+    Binance archives historically used millisecond timestamps, but newer dumps
+    may use microseconds. This helper infers the unit by magnitude.
+    """
+    s = pd.to_numeric(values, errors="coerce")
+    if s.dropna().empty:
+        return pd.to_datetime(s, unit="ms", utc=True, errors="coerce")
+    max_abs = float(s.abs().max())
+    if max_abs >= 1e18:
+        unit = "ns"
+    elif max_abs >= 1e15:
+        unit = "us"
+    elif max_abs >= 1e12:
+        unit = "ms"
+    else:
+        unit = "s"
+    return pd.to_datetime(s, unit=unit, utc=True, errors="coerce")
+
+
 class BinancePublicProvider(DataProvider):
     """Binance Public Data repository provider.
 
@@ -234,7 +255,7 @@ class BinancePublicProvider(DataProvider):
         )
 
         # Convert timestamp
-        df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        df["timestamp"] = _epoch_to_datetime_utc(df["open_time"])
 
         # Select columns
         df = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
@@ -339,7 +360,7 @@ class BinancePublicProvider(DataProvider):
         )
 
         # Convert timestamp
-        df["timestamp"] = pd.to_datetime(df["time"], unit="ms", utc=True)
+        df["timestamp"] = _epoch_to_datetime_utc(df["time"])
 
         # Determine side (is_buyer_maker=True means the maker was buyer, so trade was SELL)
         df["side"] = df["is_buyer_maker"].apply(lambda x: "SELL" if x else "BUY")
@@ -445,7 +466,7 @@ class BinancePublicProvider(DataProvider):
             names=columns,
         )
 
-        df["timestamp"] = pd.to_datetime(df["time"], unit="ms", utc=True)
+        df["timestamp"] = _epoch_to_datetime_utc(df["time"])
         df["side"] = df["is_buyer_maker"].apply(lambda x: "SELL" if x else "BUY")
         df = df.rename(columns={"qty": "quantity"})
         df["symbol"] = symbol
