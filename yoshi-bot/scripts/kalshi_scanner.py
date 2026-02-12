@@ -28,6 +28,7 @@ from src.gnosis.particle.quantum import QuantumPriceEngine
 from src.gnosis.utils.kalshi_client import KalshiClient  # noqa: E402
 import src.gnosis.utils.notifications as notify  # noqa: E402
 from src.gnosis.ingest.data_aggregator import DataSourceAggregator
+from src.gnosis.execution.signal_learning import KalshiSignalLearner
 from shared.trading_signals import (  # noqa: E402
     SIGNAL_EVENTS_PATH_DEFAULT,
     append_event_jsonl,
@@ -53,7 +54,11 @@ logging.basicConfig(
 logger = logging.getLogger("kalshi_scanner")
 
 
-def format_kalshi_report(opportunities):
+def format_kalshi_report(
+    opportunities,
+    min_buy_yes_edge: float = 0.05,
+    min_buy_no_edge: float = 0.05,
+):
     """Format the found opportunities into a clean report."""
     if not opportunities:
         return "No significant mispricings detected in current regime."
@@ -75,8 +80,13 @@ def format_kalshi_report(opportunities):
         lines.append(f"Model Prob: {opp['model_prob']:.1%}")
         edge = opp['model_prob'] - opp['market_prob']
         lines.append(f"EDGE: {edge:+.1%}")
-        action = ("BUY YES" if edge > 0.05 else "BUY NO"
-                  if edge < -0.05 else "NEUTRAL")
+        action = (
+            "BUY YES"
+            if edge >= min_buy_yes_edge
+            else "BUY NO"
+            if edge <= -min_buy_no_edge
+            else "NEUTRAL"
+        )
         lines.append(f"ACTION: `{action}`")
         lines.append("")
 
@@ -236,7 +246,8 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
                 'market_prob': market_prob,
                 'model_prob': final_prob,
                 'strike': strike,
-                'ticker': market['ticker']
+                'ticker': market['ticker'],
+                'close_time': market.get("close_time") or market.get("expiration_time") or "",
             })
 
     return opportunities
@@ -273,17 +284,27 @@ def _snapshot_symbol_to_df(snapshot: dict | None, symbol: str) -> pd.DataFrame |
         return None
 
 
-def emit_structured_signals(opportunities: list[dict], signal_path: str) -> int:
+def emit_structured_signals(
+    opportunities: list[dict],
+    signal_path: str,
+    *,
+    learner: KalshiSignalLearner | None = None,
+    fallback_edge: float = 0.10,
+) -> int:
     """Emit scanner opportunities to JSONL events for yoshi-bridge."""
     emitted = 0
     for opp in opportunities:
         edge = float(opp["model_prob"] - opp["market_prob"])
         action = (
-            "BUY_YES"
-            if edge > 0.05
-            else "BUY_NO"
-            if edge < -0.05
-            else "NEUTRAL"
+            learner.classify_edge(edge=edge, fallback_edge=fallback_edge)
+            if learner is not None
+            else (
+                "BUY_YES"
+                if edge >= fallback_edge
+                else "BUY_NO"
+                if edge <= -fallback_edge
+                else "NEUTRAL"
+            )
         )
         if action == "NEUTRAL":
             continue
@@ -299,6 +320,22 @@ def emit_structured_signals(opportunities: list[dict], signal_path: str) -> int:
         )
         event = wrap_signal_event(signal)
         append_event_jsonl(signal_path, event)
+        if learner is not None:
+            learner.record_signal(
+                {
+                    "signal_id": signal.signal_id,
+                    "ticker": signal.ticker,
+                    "symbol": signal.symbol,
+                    "action": signal.action,
+                    "edge": signal.edge,
+                    "market_prob": signal.market_prob,
+                    "model_prob": signal.model_prob,
+                    "strike": signal.strike,
+                    "source": signal.source,
+                    "created_at": signal.created_at,
+                    "close_time": str(opp.get("close_time", "")),
+                }
+            )
         emitted += 1
         logger.info(
             "signal_emitted signal_id=%s idempotency_key=%s symbol=%s action=%s edge=%.4f",
@@ -333,6 +370,53 @@ async def main():
         default=SIGNAL_EVENTS_PATH_DEFAULT,
         help=f"Structured signal JSONL path (default: {SIGNAL_EVENTS_PATH_DEFAULT})",
     )
+    parser.add_argument(
+        "--disable-learning",
+        action="store_true",
+        help="Disable adaptive backtesting/learning thresholds",
+    )
+    parser.add_argument(
+        "--learning-state-path",
+        type=str,
+        default="data/signals/learning_state.json",
+        help="Persistent pending-signal learning state path",
+    )
+    parser.add_argument(
+        "--learning-outcomes-path",
+        type=str,
+        default="data/signals/signal_outcomes.jsonl",
+        help="Resolved signal outcomes JSONL path",
+    )
+    parser.add_argument(
+        "--learning-policy-path",
+        type=str,
+        default="data/signals/learned_policy.json",
+        help="Published adaptive threshold policy path",
+    )
+    parser.add_argument(
+        "--learning-min-samples",
+        type=int,
+        default=30,
+        help="Minimum resolved samples before policy optimization",
+    )
+    parser.add_argument(
+        "--learning-lookback",
+        type=int,
+        default=300,
+        help="Resolved outcomes lookback size for threshold backtest",
+    )
+    parser.add_argument(
+        "--learning-max-resolve-checks",
+        type=int,
+        default=25,
+        help="Max pending contracts to poll for settlement each cycle",
+    )
+    parser.add_argument(
+        "--no-side-buffer",
+        type=float,
+        default=0.03,
+        help="Extra minimum edge buffer applied to BUY_NO (anti-noise)",
+    )
     args = parser.parse_args()
 
     data_path = "data/large_history/prints.parquet"
@@ -344,6 +428,17 @@ async def main():
     
     # Task 4: Initialize Quantum Engine for Param Hot-Reload
     quantum_engine = QuantumPriceEngine()
+    learner: KalshiSignalLearner | None = None
+    if not args.disable_learning:
+        learner = KalshiSignalLearner(
+            state_path=args.learning_state_path,
+            outcomes_path=args.learning_outcomes_path,
+            policy_path=args.learning_policy_path,
+            min_samples=args.learning_min_samples,
+            lookback=args.learning_lookback,
+            base_yes_edge=max(0.01, float(args.threshold)),
+            base_no_edge=max(0.01, float(args.threshold) + max(0.0, float(args.no_side_buffer))),
+        )
 
     print(f"Starting Kalshi Scanner for {args.symbol}...")
     if args.loop:
@@ -361,6 +456,25 @@ async def main():
 
     while True:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning...")
+
+        if learner is not None:
+            try:
+                resolved = learner.resolve_pending(
+                    kalshi.get_market,
+                    max_checks=args.learning_max_resolve_checks,
+                )
+                if resolved:
+                    pol = learner.policy
+                    logger.info(
+                        "learning_resolved count=%d n_resolved=%d yes_edge=%.3f no_edge=%.3f mode=%s",
+                        resolved,
+                        pol.n_resolved,
+                        pol.min_edge_buy_yes,
+                        pol.min_edge_buy_no,
+                        pol.mode,
+                    )
+            except Exception as e:  # pylint: disable=broad-except
+                logger.warning("Learning resolve cycle failed: %s", e)
         
         # Task 4: Check for Ralph updates
         quantum_engine.maybe_reload_params()
@@ -398,11 +512,31 @@ async def main():
         
         if opps:
             logger.info("Found %d opportunities!", len(opps))
-            report = format_kalshi_report(opps)
+            yes_edge = float(args.threshold)
+            no_edge = float(args.threshold)
+            if learner is not None:
+                yes_edge, no_edge = learner.effective_thresholds(fallback_edge=float(args.threshold))
+                logger.info(
+                    "learning_thresholds yes=%.3f no=%.3f pending=%d mode=%s",
+                    yes_edge,
+                    no_edge,
+                    learner.pending_count,
+                    learner.policy.mode,
+                )
+            report = format_kalshi_report(
+                opps,
+                min_buy_yes_edge=yes_edge,
+                min_buy_no_edge=no_edge,
+            )
 
             # Emit structured events for yoshi-bridge (single ingestion path)
             if args.bridge:
-                emitted = emit_structured_signals(opps, args.signal_path)
+                emitted = emit_structured_signals(
+                    opps,
+                    args.signal_path,
+                    learner=learner,
+                    fallback_edge=float(args.threshold),
+                )
                 logger.info("bridge_emit_complete count=%d path=%s", emitted, args.signal_path)
 
             # Check cooldown
