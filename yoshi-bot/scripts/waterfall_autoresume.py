@@ -40,7 +40,13 @@ def _load_waterfall_module():
     return mod
 
 
-def _build_run_args(args: argparse.Namespace, timeframe: str, start_offset: int) -> SimpleNamespace:
+def _build_run_args(
+    args: argparse.Namespace,
+    timeframe: str,
+    start_offset: int,
+    *,
+    run_seed: int,
+) -> SimpleNamespace:
     return SimpleNamespace(
         symbol=args.symbol,
         timeframes=timeframe,
@@ -49,14 +55,14 @@ def _build_run_args(args: argparse.Namespace, timeframe: str, start_offset: int)
         snapshot_lookback_bars=int(args.snapshot_lookback_bars),
         sigma_target=float(args.sigma_target),
         max_attempts_per_bar=int(args.max_attempts_per_bar),
-        allow_unconverged_progress=False,
+        allow_unconverged_progress=bool(args.allow_unconverged_progress),
         base_mc_iterations=int(args.base_mc_iterations),
         base_mc_steps=int(args.base_mc_steps),
         adaptive_sigma_calibration=bool(args.adaptive_sigma_calibration),
         sigma_calibration_rate=float(args.sigma_calibration_rate),
         sigma_scale_max=float(args.sigma_scale_max),
         ralph_explore_rate=float(args.ralph_explore_rate),
-        seed=int(args.seed),
+        seed=int(run_seed),
         log_every=int(args.log_every),
         ohlcv_providers=str(args.ohlcv_providers),
         data_timeout_s=int(args.data_timeout_s),
@@ -83,7 +89,12 @@ def _load_state(path: Path, timeframes: list[str]) -> dict[str, Any]:
                 "runs": 0,
                 "last_failed_offset": None,
                 "stall_count": 0,
+                "skipped_count": 0,
+                "skipped_offsets": [],
             }
+        else:
+            tf_state[tf].setdefault("skipped_count", 0)
+            tf_state[tf].setdefault("skipped_offsets", [])
     return state
 
 
@@ -103,6 +114,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sigma-target", type=float, default=1.0)
     p.add_argument("--max-attempts-per-bar", type=int, default=180)
     p.add_argument(
+        "--allow-unconverged-progress",
+        action="store_true",
+        help="Pass through to waterfall_backtest to continue even when a bar fails sigma target",
+    )
+    p.add_argument(
         "--adaptive-sigma-calibration",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -114,6 +130,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-mc-steps", type=int, default=48)
     p.add_argument("--ralph-explore-rate", type=float, default=0.15)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--seed-jitter-per-run",
+        type=int,
+        default=101,
+        help="Adds deterministic seed jitter each rerun to diversify hyperparam exploration",
+    )
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument(
         "--ohlcv-providers",
@@ -126,6 +148,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sleep-between-runs", type=float, default=1.0)
     p.add_argument("--max-runs-per-timeframe", type=int, default=200)
     p.add_argument("--stall-limit", type=int, default=10, help="Abort timeframe after N repeated failed offsets")
+    p.add_argument(
+        "--skip-stalled-offset",
+        action="store_true",
+        help="After hitting stall-limit on one offset, skip that offset and continue",
+    )
+    p.add_argument(
+        "--max-skipped-per-timeframe",
+        type=int,
+        default=8,
+        help="Safety cap on number of skipped offsets per timeframe",
+    )
     p.add_argument("--output-dir", type=str, default="reports/waterfall_backtest")
     p.add_argument("--state-path", type=str, default="")
     p.add_argument("--reset-state", action="store_true")
@@ -174,10 +207,16 @@ def main() -> int:
                 break
 
             start_offset = max(1, int(meta.get("next_offset", 1)))
-            run_args = _build_run_args(args, timeframe=tf, start_offset=start_offset)
+            run_seed = int(args.seed) + int(meta.get("runs", 0)) * int(args.seed_jitter_per_run)
+            run_args = _build_run_args(
+                args,
+                timeframe=tf,
+                start_offset=start_offset,
+                run_seed=run_seed,
+            )
             print(
                 f"[autoresume] run timeframe={tf} run={int(meta.get('runs', 0)) + 1} "
-                f"start_offset={start_offset}"
+                f"start_offset={start_offset} seed={run_seed}"
             )
 
             result = wf.run_waterfall(run_args)
@@ -203,6 +242,23 @@ def main() -> int:
                 meta["last_failed_offset"] = failed_offset
                 meta["next_offset"] = failed_offset
                 if int(meta.get("stall_count", 0)) >= int(args.stall_limit):
+                    skipped_count = int(meta.get("skipped_count", 0))
+                    can_skip = bool(args.skip_stalled_offset) and skipped_count < int(args.max_skipped_per_timeframe)
+                    if can_skip:
+                        skip_list = meta.setdefault("skipped_offsets", [])
+                        if failed_offset not in skip_list:
+                            skip_list.append(failed_offset)
+                        meta["skipped_count"] = skipped_count + 1
+                        meta["next_offset"] = failed_offset + 1
+                        meta["last_failed_offset"] = None
+                        meta["stall_count"] = 0
+                        print(
+                            f"[autoresume] skip stalled offset timeframe={tf} offset={failed_offset} "
+                            f"skipped_count={meta.get('skipped_count')}/{int(args.max_skipped_per_timeframe)}"
+                        )
+                        _save_state(state_path, state)
+                        time.sleep(max(0.0, float(args.sleep_between_runs)))
+                        continue
                     print(
                         f"[autoresume] stall limit reached timeframe={tf} offset={failed_offset} "
                         f"stall_count={meta.get('stall_count')}"
