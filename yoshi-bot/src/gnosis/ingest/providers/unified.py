@@ -4,6 +4,7 @@ Combines multiple data providers with automatic fallback and
 best-source selection based on data availability and quality.
 """
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Type
@@ -39,6 +40,7 @@ class UnifiedConfig:
     cache_dir: Optional[str] = None
     rate_limit_ms: int = 100
     timeout_s: int = 30
+    max_retries: int = 3
 
     @classmethod
     def from_env(cls) -> "UnifiedConfig":
@@ -61,24 +63,53 @@ class UnifiedConfig:
                     return v
             return None
 
+        def _env_int(name: str, default: int) -> int:
+            raw = os.getenv(name)
+            if not raw:
+                return int(default)
+            try:
+                return int(float(raw))
+            except ValueError:
+                return int(default)
+
+        coingecko_key = _first_env(
+            "COINGECKO_API_KEY",
+            "COINGECKO_KEY",
+            "COIN_GECKO_API_KEY",
+        )
+        coinmarketcap_key = _first_env(
+            "COINMARKETCAP_API_KEY",
+            "COINMARKETCAP_KEY",
+            "CMC_API_KEY",
+        )
+        coinapi_key = _first_env(
+            "COINAPI_API_KEY",
+            "COINAPI_KEY",
+            "COIN_API_KEY",
+            "CRYPTO_API_KEY",
+        )
+
+        configured_ohlcv = _first_env("OHLCV_PROVIDERS", "OHLCV_PROVIDER_ORDER")
+        if configured_ohlcv:
+            ohlcv_providers = [
+                p.strip().lower()
+                for p in configured_ohlcv.split(",")
+                if p.strip()
+            ]
+        elif coinapi_key:
+            # Prefer keyed low-latency API first when available.
+            ohlcv_providers = ["coinapi", "binance_public", "coingecko", "coinmarketcap", "yfinance"]
+        else:
+            ohlcv_providers = ["binance_public", "coingecko", "coinmarketcap", "yfinance", "coinapi"]
+
         return cls(
-            coingecko_api_key=_first_env(
-                "COINGECKO_API_KEY",
-                "COINGECKO_KEY",
-                "COIN_GECKO_API_KEY",
-            ),
-            coinmarketcap_api_key=_first_env(
-                "COINMARKETCAP_API_KEY",
-                "COINMARKETCAP_KEY",
-                "CMC_API_KEY",
-            ),
-            coinapi_api_key=_first_env(
-                "COINAPI_API_KEY",
-                "COINAPI_KEY",
-                "COIN_API_KEY",
-                "CRYPTO_API_KEY",
-            ),
+            coingecko_api_key=coingecko_key,
+            coinmarketcap_api_key=coinmarketcap_key,
+            coinapi_api_key=coinapi_key,
+            ohlcv_providers=ohlcv_providers,
             cache_dir=os.getenv("DATA_CACHE_DIR"),
+            timeout_s=max(3, _env_int("DATA_TIMEOUT_S", 30)),
+            max_retries=max(1, _env_int("DATA_MAX_RETRIES", 3)),
         )
 
 
@@ -142,24 +173,29 @@ class UnifiedDataFetcher:
                 api_key=self.config.coingecko_api_key,
                 rate_limit_ms=self.config.rate_limit_ms,
                 timeout_s=self.config.timeout_s,
+                max_retries=self.config.max_retries,
             ),
             "coinmarketcap": ProviderConfig(
                 api_key=self.config.coinmarketcap_api_key,
                 rate_limit_ms=self.config.rate_limit_ms,
                 timeout_s=self.config.timeout_s,
+                max_retries=self.config.max_retries,
             ),
             "coinapi": ProviderConfig(
                 api_key=self.config.coinapi_api_key,
                 rate_limit_ms=self.config.rate_limit_ms,
                 timeout_s=self.config.timeout_s,
+                max_retries=self.config.max_retries,
             ),
             "yfinance": ProviderConfig(
                 rate_limit_ms=self.config.rate_limit_ms,
                 timeout_s=self.config.timeout_s,
+                max_retries=self.config.max_retries,
             ),
             "binance_public": ProviderConfig(
                 rate_limit_ms=self.config.rate_limit_ms,
                 timeout_s=self.config.timeout_s,
+                max_retries=self.config.max_retries,
             ),
         }
 
@@ -228,6 +264,7 @@ class UnifiedDataFetcher:
             for symbol in symbols_to_fetch:
                 try:
                     print(f"Fetching {symbol} OHLCV from {provider_name}...")
+                    started_at = time.perf_counter()
                     df = prov.fetch_ohlcv(
                         symbol,
                         timeframe=timeframe,
@@ -238,10 +275,12 @@ class UnifiedDataFetcher:
 
                     if not df.empty:
                         all_data.append(df)
-                        print(f"  Got {len(df)} candles")
+                        elapsed = time.perf_counter() - started_at
+                        print(f"  Got {len(df)} candles in {elapsed:.2f}s")
                     else:
                         failed_symbols.append(symbol)
-                        print(f"  No data returned")
+                        elapsed = time.perf_counter() - started_at
+                        print(f"  No data returned (elapsed={elapsed:.2f}s)")
 
                 except Exception as e:
                     failed_symbols.append(symbol)

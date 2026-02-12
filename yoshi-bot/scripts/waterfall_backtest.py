@@ -165,9 +165,21 @@ def _prepare_imports():
     from scripts.forecaster.engine import Forecaster  # type: ignore
     from scripts.forecaster.schemas import Bar, MarketSnapshot  # type: ignore
     from gnosis.ralph.hyperparams import HyperParamManager  # type: ignore
-    from src.gnosis.ingest.providers.unified import UnifiedDataFetcher  # type: ignore
+    from src.gnosis.ingest.providers.unified import UnifiedConfig, UnifiedDataFetcher  # type: ignore
 
-    return Forecaster, Bar, MarketSnapshot, HyperParamManager, UnifiedDataFetcher
+    return Forecaster, Bar, MarketSnapshot, HyperParamManager, UnifiedDataFetcher, UnifiedConfig
+
+
+def normalize_provider_order(value: str) -> list[str]:
+    providers = [p.strip().lower() for p in str(value or "").split(",") if p.strip()]
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in providers:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
 
 
 def estimate_sigma_abs(result: Any, current_price: float) -> float:
@@ -218,7 +230,7 @@ def apply_projection_adjustment(
 
 
 def build_snapshot(hist_df: pd.DataFrame, symbol: str, timeframe: str):
-    Forecaster, Bar, MarketSnapshot, _, _ = _prepare_imports()
+    Forecaster, Bar, MarketSnapshot, _, _, _ = _prepare_imports()
     _ = Forecaster  # avoid lint warning
 
     rows = hist_df.sort_values("timestamp")
@@ -253,7 +265,7 @@ def build_snapshot(hist_df: pd.DataFrame, symbol: str, timeframe: str):
 
 
 def forecaster_from_params(params: Any, base_mc_iterations: int, base_mc_steps: int):
-    Forecaster, _, _, _, _ = _prepare_imports()
+    Forecaster, _, _, _, _, _ = _prepare_imports()
 
     kelly = _safe_float(getattr(params, "kelly_fraction", 0.25), 0.25)
     trust = _safe_float(getattr(params, "forecast_weight", 0.6), 0.6)
@@ -276,7 +288,7 @@ def forecaster_from_params(params: Any, base_mc_iterations: int, base_mc_steps: 
 
 
 def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
-    Forecaster, Bar, MarketSnapshot, HyperParamManager, UnifiedDataFetcher = _prepare_imports()
+    Forecaster, Bar, MarketSnapshot, HyperParamManager, UnifiedDataFetcher, UnifiedConfig = _prepare_imports()
     _ = (Forecaster, Bar, MarketSnapshot)
 
     out_dir = Path(args.output_dir)
@@ -291,7 +303,17 @@ def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
         seed=int(args.seed),
     )
     perf = RunningPerf()
-    fetcher = UnifiedDataFetcher()
+    fetcher_cfg = UnifiedConfig.from_env()
+    provider_order = normalize_provider_order(getattr(args, "ohlcv_providers", ""))
+    if provider_order:
+        fetcher_cfg.ohlcv_providers = provider_order
+    fetcher_cfg.timeout_s = max(3, int(getattr(args, "data_timeout_s", fetcher_cfg.timeout_s)))
+    fetcher_cfg.max_retries = max(1, int(getattr(args, "data_max_retries", fetcher_cfg.max_retries)))
+    fetcher = UnifiedDataFetcher(config=fetcher_cfg)
+    print(
+        "[waterfall] data providers="
+        f"{fetcher_cfg.ohlcv_providers} timeout_s={fetcher_cfg.timeout_s} retries={fetcher_cfg.max_retries}"
+    )
 
     strict_sigma_gate = not bool(args.allow_unconverged_progress)
     timeframes = [t.strip() for t in args.timeframes.split(",") if t.strip()]
@@ -574,6 +596,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ralph-explore-rate", type=float, default=0.15)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log-every", type=int, default=50)
+    p.add_argument(
+        "--ohlcv-providers",
+        type=str,
+        default="coinapi,binance_public,coingecko,coinmarketcap,yfinance",
+        help="Comma-separated provider order for OHLCV fallback",
+    )
+    p.add_argument(
+        "--data-timeout-s",
+        type=int,
+        default=12,
+        help="Per-request read timeout for data providers",
+    )
+    p.add_argument(
+        "--data-max-retries",
+        type=int,
+        default=1,
+        help="Request retries per provider API call",
+    )
     p.add_argument("--output-dir", type=str, default="reports/waterfall_backtest")
     return p.parse_args()
 

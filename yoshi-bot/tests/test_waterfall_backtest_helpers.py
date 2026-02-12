@@ -33,3 +33,9 @@ def test_bars_to_days_scales_with_timeframe():
     d_1h = mod.bars_to_days(2000, "1h")
     assert d_1h > d_1m
     assert d_1m >= 3
+
+
+def test_normalize_provider_order_dedupes_and_normalizes():
+    mod = _load_module()
+    out = mod.normalize_provider_order("CoinAPI, binance_public, coinapi, coingecko ")
+    assert out == ["coinapi", "binance_public", "coingecko"]

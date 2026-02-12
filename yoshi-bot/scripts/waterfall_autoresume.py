@@ -58,6 +58,9 @@ def _build_run_args(args: argparse.Namespace, timeframe: str, start_offset: int)
         ralph_explore_rate=float(args.ralph_explore_rate),
         seed=int(args.seed),
         log_every=int(args.log_every),
+        ohlcv_providers=str(args.ohlcv_providers),
+        data_timeout_s=int(args.data_timeout_s),
+        data_max_retries=int(args.data_max_retries),
         output_dir=str(args.output_dir),
     )
 
@@ -112,6 +115,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ralph-explore-rate", type=float, default=0.15)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log-every", type=int, default=50)
+    p.add_argument(
+        "--ohlcv-providers",
+        type=str,
+        default="coinapi,binance_public,coingecko,coinmarketcap,yfinance",
+        help="Comma-separated provider order passed to waterfall_backtest",
+    )
+    p.add_argument("--data-timeout-s", type=int, default=12, help="Per-request provider timeout")
+    p.add_argument("--data-max-retries", type=int, default=1, help="Per-request retries for providers")
     p.add_argument("--sleep-between-runs", type=float, default=1.0)
     p.add_argument("--max-runs-per-timeframe", type=int, default=200)
     p.add_argument("--stall-limit", type=int, default=10, help="Abort timeframe after N repeated failed offsets")

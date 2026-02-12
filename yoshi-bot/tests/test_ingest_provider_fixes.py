@@ -44,3 +44,23 @@ def test_unified_config_accepts_common_key_aliases(monkeypatch):
     assert cfg.coingecko_api_key == "cg_demo"
     assert cfg.coinmarketcap_api_key == "cmc_demo"
     assert cfg.coinapi_api_key == "coinapi_demo"
+
+
+def test_unified_config_prefers_coinapi_when_key_present(monkeypatch):
+    monkeypatch.setenv("COINAPI_API_KEY", "coinapi_live")
+    monkeypatch.delenv("OHLCV_PROVIDERS", raising=False)
+    monkeypatch.delenv("OHLCV_PROVIDER_ORDER", raising=False)
+
+    cfg = UnifiedConfig.from_env()
+    assert cfg.ohlcv_providers[0] == "coinapi"
+
+
+def test_unified_config_allows_timeout_retry_and_provider_env(monkeypatch):
+    monkeypatch.setenv("OHLCV_PROVIDERS", "coingecko,binance_public")
+    monkeypatch.setenv("DATA_TIMEOUT_S", "9")
+    monkeypatch.setenv("DATA_MAX_RETRIES", "1")
+
+    cfg = UnifiedConfig.from_env()
+    assert cfg.ohlcv_providers == ["coingecko", "binance_public"]
+    assert cfg.timeout_s == 9
+    assert cfg.max_retries == 1

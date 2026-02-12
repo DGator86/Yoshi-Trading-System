@@ -61,6 +61,8 @@ class BinancePublicProvider(DataProvider):
     requires_api_key = False
 
     BASE_URL = "https://data.binance.vision/data"
+    DEFAULT_EMPTY_STREAK_LIMIT = 5
+    MONTHLY_FIRST_MIN_DAYS = 21
 
     # Available kline intervals
     KLINE_INTERVALS = [
@@ -88,7 +90,9 @@ class BinancePublicProvider(DataProvider):
             CSV content as bytes, or None if not found
         """
         try:
-            response = self._session.get(url, timeout=self.config.timeout_s)
+            timeout_s = max(3.0, float(self.config.timeout_s))
+            connect_timeout = min(5.0, timeout_s)
+            response = self._session.get(url, timeout=(connect_timeout, timeout_s))
             if response.status_code == 404:
                 return None
             response.raise_for_status()
@@ -105,6 +109,54 @@ class BinancePublicProvider(DataProvider):
         except Exception as e:
             print(f"Error downloading {url}: {e}")
             return None
+
+    @staticmethod
+    def _prefer_monthly_first(*, timeframe: str, start_dt: datetime, end_dt: datetime) -> bool:
+        tf = str(timeframe).lower()
+        span_days = max(1, (end_dt - start_dt).days)
+        if span_days >= BinancePublicProvider.MONTHLY_FIRST_MIN_DAYS:
+            return True
+        return tf.endswith("h") or tf.endswith("d") or tf.endswith("w")
+
+    def _fetch_daily_klines(
+        self,
+        pair: str,
+        timeframe: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> List[pd.DataFrame]:
+        """Fetch daily kline files with fast-fail when nothing is reachable."""
+        all_data: List[pd.DataFrame] = []
+        current = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        empty_streak = 0
+
+        while current <= end_dt:
+            year = current.year
+            month = f"{current.month:02d}"
+            day = f"{current.day:02d}"
+
+            url = (
+                f"{self.BASE_URL}/spot/daily/klines/{pair}/{timeframe}/"
+                f"{pair}-{timeframe}-{year}-{month}-{day}.zip"
+            )
+
+            csv_data = self._download_zip(url)
+            if csv_data:
+                df = self._parse_klines_csv(csv_data, pair)
+                if not df.empty:
+                    all_data.append(df)
+                    empty_streak = 0
+            else:
+                # When the endpoint is unreachable (timeouts), bail quickly so
+                # UnifiedDataFetcher can fall back to other providers.
+                if not all_data:
+                    empty_streak += 1
+                    if empty_streak >= self.DEFAULT_EMPTY_STREAK_LIMIT:
+                        break
+
+            current += timedelta(days=1)
+
+        return all_data
 
     def fetch_ohlcv(
         self,
@@ -144,31 +196,35 @@ class BinancePublicProvider(DataProvider):
         else:
             start_dt = end_dt - timedelta(days=30)
 
-        # Collect data for each day
-        all_data = []
-        current = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-
-        while current <= end_dt:
-            year = current.year
-            month = f"{current.month:02d}"
-            day = f"{current.day:02d}"
-
-            # Try daily file first
-            url = (
-                f"{self.BASE_URL}/spot/daily/klines/{pair}/{timeframe}/"
-                f"{pair}-{timeframe}-{year}-{month}-{day}.zip"
-            )
-
-            csv_data = self._download_zip(url)
-            if csv_data:
-                df = self._parse_klines_csv(csv_data, pair)
-                all_data.append(df)
-
-            current += timedelta(days=1)
-
-        if not all_data:
-            # Try monthly files as fallback
+        all_data: List[pd.DataFrame] = []
+        prefer_monthly = self._prefer_monthly_first(
+            timeframe=timeframe,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        if prefer_monthly:
             all_data = self._fetch_monthly_klines(pair, timeframe, start_dt, end_dt)
+            if all_data:
+                latest_ts = max((df["timestamp"].max() for df in all_data if not df.empty), default=None)
+                tail_start = start_dt
+                if latest_ts is not None and not pd.isna(latest_ts):
+                    tail_start = max(
+                        start_dt,
+                        (pd.Timestamp(latest_ts).to_pydatetime() + timedelta(days=1)).replace(
+                            hour=0,
+                            minute=0,
+                            second=0,
+                            microsecond=0,
+                        ),
+                    )
+                if tail_start <= end_dt:
+                    all_data.extend(self._fetch_daily_klines(pair, timeframe, tail_start, end_dt))
+            else:
+                all_data = self._fetch_daily_klines(pair, timeframe, start_dt, end_dt)
+        else:
+            all_data = self._fetch_daily_klines(pair, timeframe, start_dt, end_dt)
+            if not all_data:
+                all_data = self._fetch_monthly_klines(pair, timeframe, start_dt, end_dt)
 
         if not all_data:
             return pd.DataFrame(
@@ -205,6 +261,7 @@ class BinancePublicProvider(DataProvider):
         """
         all_data = []
         current = start_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        empty_streak = 0
 
         while current <= end_dt:
             year = current.year
@@ -218,7 +275,14 @@ class BinancePublicProvider(DataProvider):
             csv_data = self._download_zip(url)
             if csv_data:
                 df = self._parse_klines_csv(csv_data, pair)
-                all_data.append(df)
+                if not df.empty:
+                    all_data.append(df)
+                    empty_streak = 0
+            else:
+                if not all_data:
+                    empty_streak += 1
+                    if empty_streak >= self.DEFAULT_EMPTY_STREAK_LIMIT:
+                        break
 
             # Move to next month
             if current.month == 12:
