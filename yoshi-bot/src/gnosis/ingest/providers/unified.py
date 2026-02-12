@@ -13,6 +13,7 @@ import pandas as pd
 from .base import DataProvider, ProviderConfig
 from .coingecko import CoinGeckoProvider
 from .coinmarketcap import CoinMarketCapProvider
+from .coinapi import CoinAPIProvider
 from .yfinance import YFinanceProvider
 from .binance_public import BinancePublicProvider
 
@@ -24,10 +25,11 @@ class UnifiedConfig:
     # API keys (can also be set via environment variables)
     coingecko_api_key: Optional[str] = None
     coinmarketcap_api_key: Optional[str] = None
+    coinapi_api_key: Optional[str] = None
 
     # Provider preferences (order of fallback)
     ohlcv_providers: List[str] = field(
-        default_factory=lambda: ["binance_public", "yfinance", "coingecko", "coinmarketcap"]
+        default_factory=lambda: ["binance_public", "coinapi", "coingecko", "coinmarketcap", "yfinance"]
     )
     trade_providers: List[str] = field(
         default_factory=lambda: ["binance_public"]
@@ -45,6 +47,7 @@ class UnifiedConfig:
         Environment variables:
         - COINGECKO_API_KEY
         - COINMARKETCAP_API_KEY
+        - COINAPI_API_KEY
         - CRYPTO_API_KEY (generic fallback)
         - DATA_CACHE_DIR
 
@@ -54,6 +57,7 @@ class UnifiedConfig:
         return cls(
             coingecko_api_key=os.getenv("COINGECKO_API_KEY"),
             coinmarketcap_api_key=os.getenv("COINMARKETCAP_API_KEY"),
+            coinapi_api_key=os.getenv("COINAPI_API_KEY") or os.getenv("CRYPTO_API_KEY"),
             cache_dir=os.getenv("DATA_CACHE_DIR"),
         )
 
@@ -79,6 +83,7 @@ class UnifiedDataFetcher:
     PROVIDER_CLASSES: Dict[str, Type[DataProvider]] = {
         "coingecko": CoinGeckoProvider,
         "coinmarketcap": CoinMarketCapProvider,
+        "coinapi": CoinAPIProvider,
         "yfinance": YFinanceProvider,
         "binance_public": BinancePublicProvider,
     }
@@ -88,6 +93,7 @@ class UnifiedDataFetcher:
         config: Optional[UnifiedConfig] = None,
         coingecko_key: Optional[str] = None,
         coinmarketcap_key: Optional[str] = None,
+        coinapi_key: Optional[str] = None,
     ):
         """Initialize the unified data fetcher.
 
@@ -103,6 +109,8 @@ class UnifiedDataFetcher:
             self.config.coingecko_api_key = coingecko_key
         if coinmarketcap_key:
             self.config.coinmarketcap_api_key = coinmarketcap_key
+        if coinapi_key:
+            self.config.coinapi_api_key = coinapi_key
 
         self.providers: Dict[str, DataProvider] = {}
         self._initialize_providers()
@@ -117,6 +125,11 @@ class UnifiedDataFetcher:
             ),
             "coinmarketcap": ProviderConfig(
                 api_key=self.config.coinmarketcap_api_key,
+                rate_limit_ms=self.config.rate_limit_ms,
+                timeout_s=self.config.timeout_s,
+            ),
+            "coinapi": ProviderConfig(
+                api_key=self.config.coinapi_api_key,
                 rate_limit_ms=self.config.rate_limit_ms,
                 timeout_s=self.config.timeout_s,
             ),
@@ -404,7 +417,7 @@ class UnifiedDataFetcher:
             Dictionary mapping symbol to USD price
         """
         # Try providers in order
-        for name in ["coingecko", "yfinance", "coinmarketcap"]:
+        for name in ["coinapi", "coingecko", "yfinance", "coinmarketcap"]:
             if name not in self.providers:
                 continue
 
@@ -443,6 +456,7 @@ def fetch_crypto_data(
     timeframe: str = "1h",
     coingecko_key: Optional[str] = None,
     coinmarketcap_key: Optional[str] = None,
+    coinapi_key: Optional[str] = None,
 ) -> pd.DataFrame:
     """Convenience function to fetch cryptocurrency OHLCV data.
 
@@ -461,6 +475,7 @@ def fetch_crypto_data(
     fetcher = UnifiedDataFetcher(
         coingecko_key=coingecko_key,
         coinmarketcap_key=coinmarketcap_key,
+        coinapi_key=coinapi_key,
     )
     return fetcher.fetch_ohlcv(symbols, timeframe=timeframe, days=days)
 
@@ -470,6 +485,7 @@ def fetch_crypto_prints(
     days: int = 7,
     coingecko_key: Optional[str] = None,
     coinmarketcap_key: Optional[str] = None,
+    coinapi_key: Optional[str] = None,
 ) -> pd.DataFrame:
     """Convenience function to fetch print data for Gnosis.
 
@@ -485,5 +501,6 @@ def fetch_crypto_prints(
     fetcher = UnifiedDataFetcher(
         coingecko_key=coingecko_key,
         coinmarketcap_key=coinmarketcap_key,
+        coinapi_key=coinapi_key,
     )
     return fetcher.fetch_prints(symbols, days=days)

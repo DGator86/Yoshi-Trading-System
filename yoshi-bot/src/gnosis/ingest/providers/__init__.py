@@ -6,6 +6,7 @@ multiple sources including CoinGecko, CoinMarketCap, yfinance, and more.
 from .base import DataProvider, ProviderConfig
 from .coingecko import CoinGeckoProvider
 from .coinmarketcap import CoinMarketCapProvider
+from .coinapi import CoinAPIProvider
 from .yfinance import YFinanceProvider
 from .binance_public import BinancePublicProvider
 from .unified import UnifiedDataFetcher
@@ -15,6 +16,7 @@ __all__ = [
     "ProviderConfig",
     "CoinGeckoProvider",
     "CoinMarketCapProvider",
+    "CoinAPIProvider",
     "YFinanceProvider",
     "BinancePublicProvider",
     "UnifiedDataFetcher",

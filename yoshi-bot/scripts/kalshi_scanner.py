@@ -29,6 +29,10 @@ from src.gnosis.utils.kalshi_client import KalshiClient  # noqa: E402
 import src.gnosis.utils.notifications as notify  # noqa: E402
 from src.gnosis.ingest.data_aggregator import DataSourceAggregator
 from src.gnosis.execution.signal_learning import KalshiSignalLearner
+from src.gnosis.execution.historical_learning import (
+    HistoricalBootstrapConfig,
+    bootstrap_learning_from_api,
+)
 from shared.trading_signals import (  # noqa: E402
     SIGNAL_EVENTS_PATH_DEFAULT,
     append_event_jsonl,
@@ -508,6 +512,47 @@ async def main():
         default=15,
         help="Maximum side spread (ask-bid) in cents allowed for signal emission",
     )
+    parser.add_argument(
+        "--disable-historical-bootstrap",
+        action="store_true",
+        help="Disable API-based historical bootstrap for learning cold-start",
+    )
+    parser.add_argument(
+        "--bootstrap-symbols",
+        type=str,
+        default="",
+        help="Comma-separated symbols for historical bootstrap (default: current --symbol)",
+    )
+    parser.add_argument(
+        "--bootstrap-days",
+        type=int,
+        default=90,
+        help="Historical days to fetch during bootstrap",
+    )
+    parser.add_argument(
+        "--bootstrap-timeframe",
+        type=str,
+        default="1h",
+        help="Historical candle timeframe for bootstrap (e.g. 1h, 4h, 1d)",
+    )
+    parser.add_argument(
+        "--bootstrap-horizon-bars",
+        type=int,
+        default=1,
+        help="Forward horizon bars for historical outcome resolution",
+    )
+    parser.add_argument(
+        "--bootstrap-min-edge",
+        type=float,
+        default=0.08,
+        help="Minimum absolute synthetic edge kept in bootstrap outcomes",
+    )
+    parser.add_argument(
+        "--bootstrap-max-records",
+        type=int,
+        default=4000,
+        help="Maximum synthetic resolved outcomes appended during bootstrap",
+    )
     args = parser.parse_args()
 
     data_path = "data/large_history/prints.parquet"
@@ -530,6 +575,48 @@ async def main():
             base_yes_edge=max(0.01, float(args.threshold)),
             base_no_edge=max(0.01, float(args.threshold) + max(0.0, float(args.no_side_buffer))),
         )
+        if not args.disable_historical_bootstrap:
+            try:
+                min_needed = max(10, int(args.learning_min_samples))
+                existing = learner.outcomes_count()
+                if existing < min_needed:
+                    symbols = [args.symbol]
+                    if args.bootstrap_symbols.strip():
+                        symbols = [s.strip() for s in args.bootstrap_symbols.split(",") if s.strip()]
+                    boot_cfg = HistoricalBootstrapConfig(
+                        symbols=symbols,
+                        days=max(5, int(args.bootstrap_days)),
+                        timeframe=str(args.bootstrap_timeframe),
+                        horizon_bars=max(1, int(args.bootstrap_horizon_bars)),
+                        min_abs_edge=max(0.01, float(args.bootstrap_min_edge)),
+                        max_records=max(100, int(args.bootstrap_max_records)),
+                    )
+                    report = bootstrap_learning_from_api(learner, boot_cfg)
+                    if report.get("ok"):
+                        pol = learner.policy
+                        logger.info(
+                            "historical_bootstrap_ok appended=%s total_outcomes=%s yes_edge=%.3f no_edge=%.3f symbols=%s",
+                            report.get("appended", 0),
+                            report.get("outcomes_total", 0),
+                            pol.min_edge_buy_yes,
+                            pol.min_edge_buy_no,
+                            ",".join(symbols),
+                        )
+                    else:
+                        logger.info(
+                            "historical_bootstrap_skipped reason=%s fetched=%s failed=%s",
+                            report.get("reason", "no_data"),
+                            report.get("fetched_symbols", []),
+                            report.get("failed_symbols", []),
+                        )
+                else:
+                    logger.info(
+                        "historical_bootstrap_not_needed outcomes_count=%d min_needed=%d",
+                        existing,
+                        min_needed,
+                    )
+            except Exception as e:  # pylint: disable=broad-except
+                logger.warning("Historical bootstrap failed: %s", e)
 
     print(f"Starting Kalshi Scanner for {args.symbol}...")
     if args.loop:

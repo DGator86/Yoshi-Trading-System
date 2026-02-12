@@ -144,6 +144,20 @@ class KalshiSignalLearner:
     def policy(self) -> ThresholdPolicy:
         return self._policy
 
+    def outcomes_count(self) -> int:
+        """Count resolved outcome rows on disk."""
+        if not self.outcomes_path.exists():
+            return 0
+        count = 0
+        try:
+            with self.outcomes_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        count += 1
+        except OSError:
+            return 0
+        return count
+
     def effective_thresholds(self, fallback_edge: float = 0.10) -> tuple[float, float]:
         """Return runtime thresholds clamped by the operator fallback."""
         floor = max(0.01, float(fallback_edge))
@@ -319,6 +333,76 @@ class KalshiSignalLearner:
         )
         self._save_policy()
         return self._policy
+
+    def append_resolved_outcomes(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        dedupe: bool = True,
+        recompute: bool = True,
+    ) -> int:
+        """Append externally-generated resolved outcomes.
+
+        This is used by historical bootstrap pipelines that synthesize/derive
+        resolved signal records from historical market data.
+        """
+        if not rows:
+            return 0
+
+        existing_ids: set[str] = set()
+        if dedupe and self.outcomes_path.exists():
+            try:
+                with self.outcomes_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        sid = str(rec.get("signal_id", "")).strip()
+                        if sid:
+                            existing_ids.add(sid)
+            except OSError:
+                existing_ids = set()
+
+        appended = 0
+        with self.outcomes_path.open("a", encoding="utf-8") as f:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                sid = str(row.get("signal_id", "")).strip()
+                if not sid:
+                    continue
+                if dedupe and sid in existing_ids:
+                    continue
+                normalized = {
+                    "signal_id": sid,
+                    "ticker": str(row.get("ticker", "")),
+                    "symbol": str(row.get("symbol", "")),
+                    "action": str(row.get("action", "")).upper(),
+                    "edge": float(row.get("edge", 0.0)),
+                    "market_prob": float(row.get("market_prob", 0.5)),
+                    "model_prob": float(row.get("model_prob", 0.5)),
+                    "strike": float(row.get("strike", 0.0)),
+                    "source": str(row.get("source", "historical_bootstrap")),
+                    "created_at": str(row.get("created_at", _now_utc().isoformat())),
+                    "close_time": str(row.get("close_time", "")),
+                    "settled_yes": bool(row.get("settled_yes", False)),
+                    "won": bool(row.get("won", False)),
+                    "cost_cents": int(row.get("cost_cents", 50)),
+                    "pnl_cents": float(row.get("pnl_cents", 0.0)),
+                    "resolved_at": str(row.get("resolved_at", _now_utc().isoformat())),
+                }
+                f.write(json.dumps(normalized, separators=(",", ":"), default=str) + "\n")
+                appended += 1
+                if dedupe:
+                    existing_ids.add(sid)
+
+        if recompute and appended > 0:
+            self.recompute_policy()
+        return appended
 
     @staticmethod
     def _extract_settlement_yes(market: dict[str, Any]) -> Optional[bool]:
