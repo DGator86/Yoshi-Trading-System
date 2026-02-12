@@ -301,6 +301,7 @@ def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
         "started_at": utc_now_iso(),
         "symbol": _normalize_symbol(args.symbol),
         "n_bars": int(args.n_bars),
+        "start_offset": int(max(1, args.start_offset)),
         "sigma_target": float(args.sigma_target),
         "strict_sigma_gate": strict_sigma_gate,
         "timeframes": [],
@@ -337,15 +338,21 @@ def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
 
             min_history = max(64, int(args.snapshot_lookback_bars // 3))
             max_targets = max(0, len(df) - min_history - 1)
-            n_targets = min(int(args.n_bars), max_targets)
+            end_offset = min(int(args.n_bars), max_targets)
+            start_offset = max(1, min(int(args.start_offset), max(1, end_offset)))
+            offsets = list(range(start_offset, end_offset + 1)) if end_offset >= start_offset else []
+            n_targets = len(offsets)
             tf_summary = {
                 "timeframe": timeframe,
                 "rows": int(len(df)),
                 "fetched_days": int(fetch_days),
                 "targets_requested": int(args.n_bars),
+                "start_offset": int(start_offset),
+                "end_offset": int(end_offset),
                 "targets_run": int(n_targets),
                 "converged_count": 0,
                 "failed_count": 0,
+                "failed_offset": None,
                 "mean_error_sigma": None,
                 "median_error_sigma": None,
                 "mean_attempts": None,
@@ -363,7 +370,7 @@ def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
 
             print(f"\n[waterfall] timeframe={timeframe} rows={len(df)} targets={n_targets}")
 
-            for idx, offset in enumerate(range(1, n_targets + 1), start=1):
+            for idx, offset in enumerate(offsets, start=1):
                 target_idx = len(df) - offset
                 hist_end = target_idx
                 hist_start = max(0, hist_end - int(args.snapshot_lookback_bars))
@@ -475,6 +482,7 @@ def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
                     tf_summary["failed_count"] += 1
                     if strict_sigma_gate:
                         tf_summary["status"] = "stopped_unconverged"
+                        tf_summary["failed_offset"] = int(offset)
                         overall["stopped_early"] = True
                         print(
                             f"[waterfall] stop timeframe={timeframe} offset={offset} "
@@ -522,6 +530,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=",".join(DEFAULT_TIMEFRAMES),
         help="Comma-separated timeframe waterfall order",
+    )
+    p.add_argument(
+        "--start-offset",
+        type=int,
+        default=1,
+        help="Start blind projection at this offset from present (1 = next bar)",
     )
     p.add_argument("--n-bars", type=int, default=2000, help="Blind projection offsets per timeframe")
     p.add_argument("--snapshot-lookback-bars", type=int, default=600, help="History bars provided to forecaster")
