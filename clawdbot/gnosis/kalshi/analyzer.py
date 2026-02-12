@@ -62,6 +62,9 @@ Key rules:
 - Time to expiry matters: closer = more certain pricing
 - Never recommend trading when the edge source is "market-baseline"
 - A model_source of "price-distance" is a simple logistic — be conservative
+- When forecast context is provided, treat it as the primary thesis:
+  compare forecast end-of-hour expectation vs market-implied odds and
+  focus on contracts with genuine forecast-vs-market mispricing.
 
 Return this JSON structure:
 {
@@ -76,13 +79,37 @@ Return this JSON structure:
 }"""
 
 
-def _build_user_prompt(results: List[ScanResult]) -> str:
+def _build_user_prompt(
+    results: List[ScanResult],
+    forecast_context: Optional[Dict[str, Any]] = None,
+) -> str:
     """Build user prompt from scan results."""
+    ctx_by_ticker: Dict[str, Dict[str, Any]] = {}
+    if forecast_context:
+        for row in forecast_context.get("opportunity_overrides", []) or []:
+            ticker = str(row.get("ticker", ""))
+            if ticker:
+                ctx_by_ticker[ticker] = row
+
     lines = [
         "Analyze these Kalshi binary market opportunities for value:",
         "",
     ]
+    if forecast_context:
+        lines.extend(
+            [
+                "Forecast context (end-of-hour view):",
+                f"- Symbol: {forecast_context.get('symbol', '?')}",
+                f"- Current Price: ${float(forecast_context.get('current_price', 0.0)):,.2f}",
+                f"- Predicted End Price: ${float(forecast_context.get('predicted_price_end_hour', 0.0)):,.2f}",
+                f"- Forecast Confidence: {float(forecast_context.get('forecast_confidence', 0.0)):.1%}",
+                f"- Horizon: {float(forecast_context.get('horizon_hours', 1.0)):.2f}h",
+                f"- Regime: {forecast_context.get('regime', 'unknown')}",
+                "",
+            ]
+        )
     for i, r in enumerate(results, 1):
+        ctx = ctx_by_ticker.get(r.ticker, {})
         lines.extend([
             f"--- Opportunity #{i} ---",
             f"Ticker: {r.ticker}",
@@ -100,6 +127,8 @@ def _build_user_prompt(results: List[ScanResult]) -> str:
             f"Volume: {r.volume}",
             f"Time to expiry: {r.minutes_to_expiry:.0f} min" if r.minutes_to_expiry else "",
             f"Composite Score: {r.composite_score:.3f}",
+            f"Forecast Prob (selected side): {float(ctx.get('forecast_prob_side', 0.0)):.1%}" if ctx else "",
+            f"Forecast-vs-market mispricing: {float(ctx.get('forecast_market_gap_pct', 0.0)):+.2f}%" if ctx else "",
             "",
         ])
 
@@ -123,7 +152,12 @@ class KalshiAnalyzer:
     def __init__(self, llm_client: LLMClient = None):
         self.client = llm_client or LLMClient()
 
-    def analyze(self, results: List[ScanResult]) -> List[ValuePlay]:
+    def analyze(
+        self,
+        results: List[ScanResult],
+        forecast_context: Optional[Dict[str, Any]] = None,
+        enable_llm: bool = True,
+    ) -> List[ValuePlay]:
         """
         Analyze scan results and return value plays.
 
@@ -134,7 +168,11 @@ class KalshiAnalyzer:
             return []
 
         t0 = time.time()
-        user_prompt = _build_user_prompt(results)
+        user_prompt = _build_user_prompt(results, forecast_context=forecast_context)
+
+        if not enable_llm:
+            elapsed = (time.time() - t0) * 1000
+            return [self._rule_based(r, elapsed, forecast_context=forecast_context) for r in results]
 
         resp = self.client.chat(
             system_prompt=_SYSTEM_PROMPT,
@@ -146,7 +184,7 @@ class KalshiAnalyzer:
 
         if resp.is_stub or resp.error:
             # Rule-based fallback
-            return [self._rule_based(r, elapsed) for r in results]
+            return [self._rule_based(r, elapsed, forecast_context=forecast_context) for r in results]
 
         # Parse LLM response
         return self._parse_response(resp, results, elapsed)
@@ -154,7 +192,7 @@ class KalshiAnalyzer:
     def analyze_single(self, result: ScanResult) -> ValuePlay:
         """Analyze a single scan result."""
         plays = self.analyze([result])
-        return plays[0] if plays else self._rule_based(result, 0)
+        return plays[0] if plays else self._rule_based(result, 0, forecast_context=None)
 
     def _parse_response(
         self, resp: LLMResponse, results: List[ScanResult], elapsed: float,
@@ -203,7 +241,12 @@ class KalshiAnalyzer:
 
         return plays
 
-    def _rule_based(self, result: ScanResult, elapsed: float) -> ValuePlay:
+    def _rule_based(
+        self,
+        result: ScanResult,
+        elapsed: float,
+        forecast_context: Optional[Dict[str, Any]] = None,
+    ) -> ValuePlay:
         """Simple rule-based analysis when LLM is unavailable."""
         # Conservative rules
         if result.edge_pct >= 10 and result.ev_cents >= 3 and result.volume >= 10:
@@ -223,6 +266,25 @@ class KalshiAnalyzer:
             rec = "SKIP"
             score = 0
             risk = "EXTREME"
+
+        # Forecast-aware adjustment: require selected side to align with
+        # end-of-hour forecast mispricing when context is present.
+        if forecast_context:
+            ctx_map = {
+                str(x.get("ticker", "")): x
+                for x in (forecast_context.get("opportunity_overrides", []) or [])
+            }
+            ctx = ctx_map.get(result.ticker)
+            if ctx:
+                gap = float(ctx.get("forecast_market_gap_pct", 0.0))
+                if gap < 0:
+                    rec = "SKIP"
+                    score = min(score, 1.0)
+                    risk = "EXTREME"
+                elif gap >= 8 and rec == "WATCH":
+                    rec = "BUY"
+                    score = max(score, 7.0)
+                    risk = "MODERATE"
 
         return ValuePlay(
             scan=result,

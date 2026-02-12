@@ -25,6 +25,7 @@ Single-command: `python3 scripts/kalshi-system.py`
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 from dataclasses import dataclass, field
@@ -50,6 +51,9 @@ class OrchestratorConfig:
     # Kalshi scanner
     top_n: int = 5                    # top picks per scan
     use_llm: bool = True              # LLM value analysis (free tier)
+    llm_min_forecast_confidence: float = 0.60  # engage LLM only above this confidence
+    llm_min_forecast_mispricing_pct: float = 2.0  # require forecast-vs-market gap
+    max_minutes_to_expiry: float = 90.0  # focus on hourly windows
 
     # Ralph learning
     learning: LearningConfig = field(default_factory=LearningConfig)
@@ -364,6 +368,67 @@ class UnifiedOrchestrator:
         return forecast, kpcofgs, regime
 
     # ── Kalshi Step ───────────────────────────────────────
+    @staticmethod
+    def _forecast_sigma_ratio(forecast: Dict[str, Any]) -> float:
+        """Estimate hourly sigma ratio used for barrier probability mapping."""
+        cur = float(forecast.get("current_price", 0.0) or 0.0)
+        vol = float(forecast.get("volatility", 0.0) or 0.0)
+        if cur <= 0 or vol <= 0:
+            return 0.01
+        # vol may be relative or absolute depending on source model.
+        rel = vol if vol <= 1 else vol / cur
+        return max(0.004, min(0.08, rel))
+
+    def _forecast_prob_above(self, strike: float, forecast: Dict[str, Any]) -> float:
+        """Approximate P(price_end_hour > strike) from forecast target + confidence."""
+        cur = float(forecast.get("current_price", 0.0) or 0.0)
+        pred = float(forecast.get("predicted_price", 0.0) or 0.0)
+        conf = float(forecast.get("confidence", 0.0) or 0.0)
+        if cur <= 0 or strike <= 0:
+            return 0.5
+        sigma = self._forecast_sigma_ratio(forecast)
+        z = (pred - strike) / max(cur * sigma, 1e-9)
+        p = 1.0 / (1.0 + math.exp(-z))
+        # Confidence gates how far we trust distance-driven probability from 0.5.
+        conf_scale = max(0.0, min(1.0, conf))
+        p = 0.5 + (p - 0.5) * conf_scale
+        return max(0.02, min(0.98, p))
+
+    def _build_forecast_context(
+        self,
+        scan_results: List[Any],
+        forecast: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build per-opportunity context for LLM mispricing analysis."""
+        context = {
+            "symbol": forecast.get("symbol", "BTCUSDT"),
+            "current_price": float(forecast.get("current_price", 0.0) or 0.0),
+            "predicted_price_end_hour": float(forecast.get("predicted_price", 0.0) or 0.0),
+            "forecast_confidence": float(forecast.get("confidence", 0.0) or 0.0),
+            "horizon_hours": float(forecast.get("horizon_hours", self.config.horizon_hours) or self.config.horizon_hours),
+            "regime": forecast.get("regime", "unknown"),
+            "opportunity_overrides": [],
+        }
+
+        overrides = []
+        for sr in scan_results:
+            strike = float(getattr(sr, "strike", 0.0) or 0.0)
+            side = str(getattr(sr, "side", "yes") or "yes").lower()
+            market_prob_side = float(getattr(sr, "market_prob", 0.5) or 0.5)
+            p_above = self._forecast_prob_above(strike, forecast) if strike > 0 else 0.5
+            p_side = p_above if side == "yes" else (1.0 - p_above)
+            gap_pct = (p_side - market_prob_side) * 100.0
+            overrides.append(
+                {
+                    "ticker": getattr(sr, "ticker", ""),
+                    "side": side,
+                    "forecast_prob_side": round(p_side, 4),
+                    "forecast_market_gap_pct": round(gap_pct, 2),
+                }
+            )
+        context["opportunity_overrides"] = overrides
+        return context
+
     def _run_kalshi(
         self,
         params: HyperParams,
@@ -413,19 +478,82 @@ class UnifiedOrchestrator:
                 current_prices=current_prices,
             )
 
+            # Focus on near-hour expiry windows for hourly market execution.
+            if scan_results:
+                aligned = []
+                for sr in scan_results:
+                    mins = getattr(sr, "minutes_to_expiry", None)
+                    if mins is None or float(mins) <= float(self.config.max_minutes_to_expiry):
+                        aligned.append(sr)
+                if self.config.verbose and len(aligned) != len(scan_results):
+                    print(
+                        "    Filtered by expiry window: "
+                        f"{len(scan_results)} -> {len(aligned)} "
+                        f"(<= {self.config.max_minutes_to_expiry:.0f} min)"
+                    )
+                scan_results = aligned
+
             if self.config.verbose:
                 print(f"    Found {len(scan_results)} opportunities")
 
-            # LLM analysis
-            if scan_results and self.config.use_llm:
+            if scan_results:
                 analyzer = KalshiAnalyzer()
-                value_plays = analyzer.analyze(scan_results)
+                forecast_conf = float(forecast.get("confidence", 0.0) or 0.0)
+                forecast_context = self._build_forecast_context(scan_results, forecast) if forecast else {}
+
+                # Only route to LLM when our forecast confidence is high enough.
+                can_use_llm = (
+                    self.config.use_llm
+                    and forecast_conf >= float(self.config.llm_min_forecast_confidence)
+                )
+
+                # LLM should focus on contracts that are mispriced relative to end-of-hour forecast.
+                llm_tickers = set()
+                for row in forecast_context.get("opportunity_overrides", []) if forecast_context else []:
+                    if float(row.get("forecast_market_gap_pct", 0.0)) >= float(self.config.llm_min_forecast_mispricing_pct):
+                        llm_tickers.add(str(row.get("ticker", "")))
+
+                llm_candidates = [sr for sr in scan_results if getattr(sr, "ticker", "") in llm_tickers]
+                non_llm_candidates = [sr for sr in scan_results if getattr(sr, "ticker", "") not in llm_tickers]
+
+                if can_use_llm and llm_candidates:
+                    llm_plays = analyzer.analyze(
+                        llm_candidates,
+                        forecast_context=forecast_context,
+                        enable_llm=True,
+                    )
+                    rb_plays = analyzer.analyze(
+                        non_llm_candidates,
+                        forecast_context=forecast_context,
+                        enable_llm=False,
+                    ) if non_llm_candidates else []
+                    value_plays = llm_plays + rb_plays
+                    if self.config.verbose:
+                        print(
+                            "    LLM engaged: "
+                            f"{len(llm_candidates)} forecast-mispriced candidates "
+                            f"(confidence={forecast_conf:.1%})"
+                        )
+                else:
+                    value_plays = analyzer.analyze(
+                        scan_results,
+                        forecast_context=forecast_context,
+                        enable_llm=False,
+                    )
+                    if self.config.verbose:
+                        reason = (
+                            f"confidence {forecast_conf:.1%} < {self.config.llm_min_forecast_confidence:.1%}"
+                            if not can_use_llm
+                            else "no forecast-mispriced candidates above threshold"
+                        )
+                        print(f"    LLM skipped: {reason}")
+
+                value_plays.sort(key=lambda vp: float(getattr(vp, "value_score", 0.0)), reverse=True)
 
                 buy_count = sum(1 for vp in value_plays if vp.recommendation == "BUY")
                 watch_count = sum(1 for vp in value_plays if vp.recommendation == "WATCH")
-
                 if self.config.verbose:
-                    print(f"    LLM: {buy_count} BUY, {watch_count} WATCH")
+                    print(f"    Plays: {buy_count} BUY, {watch_count} WATCH")
 
         except Exception as e:
             if self.config.verbose:

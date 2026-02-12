@@ -73,6 +73,12 @@ def parse_args():
                     help="Ralph exploration rate (default: 0.10)")
     p.add_argument("--series", type=str, default="KXBTC,KXETH",
                     help="Kalshi series (default: KXBTC,KXETH)")
+    p.add_argument("--llm-min-confidence", type=float, default=None,
+                    help="Only engage LLM when forecast confidence >= this value (0-1)")
+    p.add_argument("--llm-min-mispricing", type=float, default=None,
+                    help="Only send contracts to LLM when forecast-vs-market gap >= this %%")
+    p.add_argument("--max-minutes-to-expiry", type=float, default=None,
+                    help="Ignore contracts expiring later than this many minutes")
     return p.parse_args()
 
 
@@ -153,6 +159,29 @@ def main():
             enable_ralph=True,
             verbose=False,
         )
+        if args.llm_min_confidence is not None:
+            config.llm_min_forecast_confidence = max(0.0, min(1.0, args.llm_min_confidence))
+        elif os.environ.get("LLM_MIN_FORECAST_CONFIDENCE"):
+            config.llm_min_forecast_confidence = max(
+                0.0,
+                min(1.0, float(os.environ["LLM_MIN_FORECAST_CONFIDENCE"])),
+            )
+
+        if args.llm_min_mispricing is not None:
+            config.llm_min_forecast_mispricing_pct = max(0.0, float(args.llm_min_mispricing))
+        elif os.environ.get("LLM_MIN_FORECAST_MISPRICING_PCT"):
+            config.llm_min_forecast_mispricing_pct = max(
+                0.0,
+                float(os.environ["LLM_MIN_FORECAST_MISPRICING_PCT"]),
+            )
+
+        if args.max_minutes_to_expiry is not None:
+            config.max_minutes_to_expiry = max(5.0, float(args.max_minutes_to_expiry))
+        elif os.environ.get("MAX_MINUTES_TO_EXPIRY"):
+            config.max_minutes_to_expiry = max(
+                5.0,
+                float(os.environ["MAX_MINUTES_TO_EXPIRY"]),
+            )
         orchestrator = UnifiedOrchestrator(config=config)
 
     # Create and run bot
