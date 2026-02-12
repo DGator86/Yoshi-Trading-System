@@ -253,6 +253,26 @@ async def data_loop(aggregator: DataSourceAggregator, symbols: list[str], interv
         await asyncio.sleep(interval)
 
 
+def _snapshot_symbol_to_df(snapshot: dict | None, symbol: str) -> pd.DataFrame | None:
+    """Convert cached aggregator symbol snapshot to OHLCV DataFrame."""
+    if not snapshot or symbol not in snapshot.get("symbols", {}):
+        return None
+    s_data = snapshot["symbols"][symbol]
+    try:
+        df = pd.DataFrame(s_data["ohlcv"])
+        if df.empty:
+            return None
+        if pd.api.types.is_numeric_dtype(df["timestamp"]):
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+        cols = ["open", "high", "low", "close", "volume"]
+        for c in cols:
+            df[c] = df[c].astype(float)
+        return df
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error converting cache to DataFrame: %s", e)
+        return None
+
+
 def emit_structured_signals(opportunities: list[dict], signal_path: str) -> int:
     """Emit scanner opportunities to JSONL events for yoshi-bridge."""
     emitted = 0
@@ -297,7 +317,7 @@ async def main():
     parser.add_argument("--symbol", type=str, default="BTCUSDT",
                         help="Symbol to scan (e.g. BTCUSDT, ETHUSDT)")
     parser.add_argument("--loop", action="store_true", help="Run continuously")
-    parser.add_argument("--interval", type=int, default=300,
+    parser.add_argument("--interval", type=int, default=60,
                         help="Interval between scans in seconds")
     parser.add_argument("--threshold", type=float, default=0.10,
                         help="Edge threshold for alerts (e.g. 0.10 = 10%)")
@@ -333,6 +353,11 @@ async def main():
     if args.live:
         asyncio.create_task(data_loop(aggregator, [args.symbol]))
         print("Background data aggregator started.")
+        # Prime cache immediately so first scan doesn't wait for background loop.
+        try:
+            await aggregator.fetch_cycle([args.symbol])
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("Initial live data fetch failed: %s", e)
 
     while True:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning...")
@@ -344,44 +369,29 @@ async def main():
         if args.live:
             # Task 1: Use aggregator cache instead of direct fetch
             snapshot = aggregator.get_latest()
-            if snapshot and args.symbol in snapshot.get("symbols", {}):
-                s_data = snapshot["symbols"][args.symbol]
-                
-                # Convert list of dicts to DataFrame
-                # s_data["ohlcv"] is list of dicts [timestamp, open, high, low, close, volume]
+            live_data = _snapshot_symbol_to_df(snapshot, args.symbol)
+            if live_data is None:
                 try:
-                    df = pd.DataFrame(s_data["ohlcv"])
-                    if not df.empty:
-                        # Ensure timestamp is datetime
-                        if pd.api.types.is_numeric_dtype(df["timestamp"]):
-                            df["timestamp"] = pd.to_datetime(df["timestamp"], unit='s')
-                        
-                        # Ensure columns are present and correct type
-                        cols = ["open", "high", "low", "close", "volume"]
-                        for c in cols:
-                            df[c] = df[c].astype(float)
-                        
-                        live_data = df
-                        # print(f"Loaded {len(live_data)} bars from cache ({snapshot['source']})")
-                except Exception as e:
-                    logger.error(f"Error converting cache to DataFrame: {e}")
-
-            else:
-                if snapshot:
-                    logger.warning(f"Symbol {args.symbol} not in cache.")
-                else:
-                    logger.warning("Cache empty or stale.")
+                    # One-shot refresh attempt before giving up this cycle.
+                    await aggregator.fetch_cycle([args.symbol])
+                    live_data = _snapshot_symbol_to_df(aggregator.get_latest(), args.symbol)
+                except Exception as e:  # pylint: disable=broad-except
+                    logger.warning("Live refresh failed for %s: %s", args.symbol, e)
         
         if live_data is None:
             if args.live:
-                print("No live data available yet (waiting for aggregator). Using local fallback if allowed.")
+                logger.info("No live cache for %s yet; skipping this cycle.", args.symbol)
+                if not args.loop:
+                    break
+                await asyncio.sleep(min(args.interval, 15))
+                continue
             else:
                 print("Live mode disabled. Using local parquet.")
 
         # Run Scan
         opps = run_scan(
             args.symbol,
-            data_path if not args.live or live_data is None else None,
+            data_path if not args.live else None,
             args.threshold,
             live_ohlcv=live_data
         )
