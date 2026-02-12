@@ -40,4 +40,15 @@ else
   echo "⚠ clawdbot/kalshi-bot/package.json not found"
 fi
 
+# Install Node dependencies for tracking dashboard
+if [ -f "yoshi-tracking-dashboard/package.json" ]; then
+  echo "Installing Node dependencies from yoshi-tracking-dashboard/package.json..."
+  cd yoshi-tracking-dashboard
+  npm install --quiet
+  cd ..
+  echo "✓ Tracking Dashboard dependencies installed"
+else
+  echo "⚠ yoshi-tracking-dashboard/package.json not found"
+fi
+
 echo "=== Dependencies installation complete ==="
