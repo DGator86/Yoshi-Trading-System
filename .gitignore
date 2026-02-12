@@ -46,3 +46,5 @@ temp/
 
 # local env backups
 .env.bak*
+
+.env.bak*
