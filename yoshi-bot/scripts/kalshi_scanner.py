@@ -54,11 +54,7 @@ logging.basicConfig(
 logger = logging.getLogger("kalshi_scanner")
 
 
-def format_kalshi_report(
-    opportunities,
-    min_buy_yes_edge: float = 0.05,
-    min_buy_no_edge: float = 0.05,
-):
+def format_kalshi_report(opportunities):
     """Format the found opportunities into a clean report."""
     if not opportunities:
         return "No significant mispricings detected in current regime."
@@ -80,13 +76,10 @@ def format_kalshi_report(
         lines.append(f"Model Prob: {opp['model_prob']:.1%}")
         edge = opp['model_prob'] - opp['market_prob']
         lines.append(f"EDGE: {edge:+.1%}")
-        action = (
-            "BUY YES"
-            if edge >= min_buy_yes_edge
-            else "BUY NO"
-            if edge <= -min_buy_no_edge
-            else "NEUTRAL"
-        )
+        action = opp.get("action", "NEUTRAL").replace("_", " ")
+        ev = opp.get("ev_cents")
+        if ev is not None:
+            lines.append(f"EV: {float(ev):+.1f}c")
         lines.append(f"ACTION: `{action}`")
         lines.append("")
 
@@ -94,7 +87,26 @@ def format_kalshi_report(
     return "\n".join(lines)
 
 
-def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
+def _safe_prob(x: float) -> float:
+    return max(0.001, min(0.999, float(x)))
+
+
+def _calc_side_ev_cents(prob_win: float, cost_cents: int) -> float:
+    prob = _safe_prob(prob_win)
+    cost = max(1, min(99, int(cost_cents)))
+    profit = 100 - cost
+    return (prob * profit) - ((1.0 - prob) * cost)
+
+
+def run_scan(
+    symbol,
+    data_path=None,
+    edge_threshold=0.10,
+    live_ohlcv=None,
+    min_ev_cents: float = 5.0,
+    min_volume: float = 25.0,
+    max_spread_cents: int = 15,
+):
     """Perform a single scan for opportunities using live Kalshi data."""
 
     if live_ohlcv is not None:
@@ -238,17 +250,65 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
         final_median = sum(medians) / len(medians)
         edge = final_prob - market_prob
 
-        if abs(edge) >= edge_threshold:
-            opportunities.append({
-                'symbol': symbol,
-                'current_p': current_p,
-                'forecast_p': final_median,
-                'market_prob': market_prob,
-                'model_prob': final_prob,
-                'strike': strike,
-                'ticker': market['ticker'],
-                'close_time': market.get("close_time") or market.get("expiration_time") or "",
-            })
+        action = None
+        side_prob = 0.0
+        side_market_prob = 0.0
+        side_cost = 0
+        side_bid = 0
+
+        no_bid = int(market.get("no_bid", 0) or 0)
+        no_ask = int(market.get("no_ask", 0) or 0)
+        volume = float(market.get("volume", 0) or 0.0)
+
+        if edge >= edge_threshold:
+            action = "BUY_YES"
+            side_prob = final_prob
+            side_market_prob = market_prob
+            side_cost = int(y_ask or round(market_prob * 100))
+            side_bid = int(y_bid or 0)
+        elif edge <= -edge_threshold:
+            action = "BUY_NO"
+            side_prob = 1.0 - final_prob
+            side_market_prob = 1.0 - market_prob
+            side_cost = int(no_ask or round((1.0 - market_prob) * 100))
+            side_bid = int(no_bid or 0)
+
+        if not action:
+            continue
+
+        side_cost = max(1, min(99, side_cost))
+        ev_cents = _calc_side_ev_cents(prob_win=side_prob, cost_cents=side_cost)
+        spread_cents = max(0, side_cost - side_bid) if side_bid > 0 else None
+        side_edge_pct = (side_prob - side_market_prob) * 100.0
+
+        # Value-only gating: positive expectancy and basic liquidity quality.
+        if ev_cents < float(min_ev_cents):
+            continue
+        if volume < float(min_volume):
+            continue
+        if spread_cents is not None and spread_cents > int(max_spread_cents):
+            continue
+
+        opportunities.append({
+            'symbol': symbol,
+            'current_p': current_p,
+            'forecast_p': final_median,
+            'market_prob': market_prob,
+            'model_prob': final_prob,
+            'strike': strike,
+            'ticker': market['ticker'],
+            'close_time': market.get("close_time") or market.get("expiration_time") or "",
+            'action': action,
+            'ev_cents': round(ev_cents, 2),
+            'side_cost_cents': side_cost,
+            'side_edge_pct': round(side_edge_pct, 2),
+            'volume': volume,
+            'spread_cents': spread_cents,
+            'yes_bid': int(y_bid or 0),
+            'yes_ask': int(y_ask or 0),
+            'no_bid': no_bid,
+            'no_ask': no_ask,
+        })
 
     return opportunities
 
@@ -295,16 +355,19 @@ def emit_structured_signals(
     emitted = 0
     for opp in opportunities:
         edge = float(opp["model_prob"] - opp["market_prob"])
-        action = (
-            learner.classify_edge(edge=edge, fallback_edge=fallback_edge)
-            if learner is not None
-            else (
+        default_action = str(opp.get("action", "")).strip().upper()
+        if default_action not in {"BUY_YES", "BUY_NO"}:
+            default_action = (
                 "BUY_YES"
                 if edge >= fallback_edge
                 else "BUY_NO"
                 if edge <= -fallback_edge
                 else "NEUTRAL"
             )
+        action = (
+            learner.classify_edge(edge=edge, fallback_edge=fallback_edge)
+            if learner is not None
+            else default_action
         )
         if action == "NEUTRAL":
             continue
@@ -318,10 +381,8 @@ def emit_structured_signals(
             edge=edge,
             source="kalshi_scanner",
         )
-        event = wrap_signal_event(signal)
-        append_event_jsonl(signal_path, event)
         if learner is not None:
-            learner.record_signal(
+            accepted = learner.record_signal(
                 {
                     "signal_id": signal.signal_id,
                     "ticker": signal.ticker,
@@ -336,14 +397,26 @@ def emit_structured_signals(
                     "close_time": str(opp.get("close_time", "")),
                 }
             )
+            if not accepted:
+                logger.info(
+                    "signal_suppressed_duplicate ticker=%s action=%s edge=%.4f",
+                    signal.ticker,
+                    signal.action,
+                    signal.edge,
+                )
+                continue
+        event = wrap_signal_event(signal)
+        append_event_jsonl(signal_path, event)
         emitted += 1
         logger.info(
-            "signal_emitted signal_id=%s idempotency_key=%s symbol=%s action=%s edge=%.4f",
+            "signal_emitted signal_id=%s idempotency_key=%s symbol=%s action=%s edge=%.4f ev_cents=%s volume=%s",
             signal.signal_id,
             signal.idempotency_key,
             signal.symbol,
             signal.action,
             signal.edge,
+            opp.get("ev_cents"),
+            opp.get("volume"),
         )
     return emitted
 
@@ -416,6 +489,24 @@ async def main():
         type=float,
         default=0.03,
         help="Extra minimum edge buffer applied to BUY_NO (anti-noise)",
+    )
+    parser.add_argument(
+        "--min-ev-cents",
+        type=float,
+        default=5.0,
+        help="Minimum expected value in cents required to emit a trade signal",
+    )
+    parser.add_argument(
+        "--min-market-volume",
+        type=float,
+        default=25.0,
+        help="Minimum market volume required to emit a trade signal",
+    )
+    parser.add_argument(
+        "--max-spread-cents",
+        type=int,
+        default=15,
+        help="Maximum side spread (ask-bid) in cents allowed for signal emission",
     )
     args = parser.parse_args()
 
@@ -507,7 +598,10 @@ async def main():
             args.symbol,
             data_path if not args.live else None,
             args.threshold,
-            live_ohlcv=live_data
+            live_ohlcv=live_data,
+            min_ev_cents=args.min_ev_cents,
+            min_volume=args.min_market_volume,
+            max_spread_cents=args.max_spread_cents,
         )
         
         if opps:
@@ -523,11 +617,7 @@ async def main():
                     learner.pending_count,
                     learner.policy.mode,
                 )
-            report = format_kalshi_report(
-                opps,
-                min_buy_yes_edge=yes_edge,
-                min_buy_no_edge=no_edge,
-            )
+            report = format_kalshi_report(opps)
 
             # Emit structured events for yoshi-bridge (single ingestion path)
             if args.bridge:

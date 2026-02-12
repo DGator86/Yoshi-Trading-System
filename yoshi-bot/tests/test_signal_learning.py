@@ -67,6 +67,41 @@ def test_resolve_pending_marks_outcome_and_appends_jsonl(tmp_path):
     assert row["pnl_cents"] > 0
 
 
+def test_record_signal_suppresses_duplicate_pending_ticker_side(tmp_path):
+    learner = _new_learner(tmp_path)
+    first = learner.record_signal(
+        {
+            "signal_id": "sig_first",
+            "ticker": "KXBTC-TEST-T100000",
+            "symbol": "BTCUSDT",
+            "action": "BUY_NO",
+            "edge": -0.16,
+            "market_prob": 0.64,
+            "model_prob": 0.48,
+            "strike": 100000.0,
+            "source": "unit_test",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    second = learner.record_signal(
+        {
+            "signal_id": "sig_second",
+            "ticker": "KXBTC-TEST-T100000",
+            "symbol": "BTCUSDT",
+            "action": "BUY_NO",
+            "edge": -0.14,
+            "market_prob": 0.62,
+            "model_prob": 0.48,
+            "strike": 100000.0,
+            "source": "unit_test",
+            "created_at": "2026-01-01T00:01:00+00:00",
+        }
+    )
+    assert first is True
+    assert second is False
+    assert learner.pending_count == 1
+
+
 def test_backtest_raises_buy_no_threshold_when_weak_edges_fail(tmp_path):
     learner = _new_learner(tmp_path)
     outcomes_path = tmp_path / "outcomes.jsonl"
