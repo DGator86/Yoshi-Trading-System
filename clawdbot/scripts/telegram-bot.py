@@ -10,6 +10,7 @@ with Telegram push notifications and command interface.
 
     What it does:
         - Receives commands: /scan /status /ralph /params /help
+        - Handles normal chat messages conversationally
         - Runs the orchestrator in the background (every 60s)
         - Pushes BUY alerts to your phone automatically
         - Ralph learns and optimizes continuously
@@ -54,6 +55,16 @@ def parse_args():
                     help="Skip ClawdBot forecast")
     p.add_argument("--notify-all", action="store_true",
                     help="Send full cycle reports (not just BUY alerts)")
+    p.add_argument("--no-conversation", action="store_true",
+                    help="Disable natural-language chat handling (commands only)")
+    p.add_argument("--no-llm-chat", action="store_true",
+                    help="Disable LLM conversational replies (rule-based only)")
+    p.add_argument("--llm-provider", type=str, default="",
+                    help="Optional provider hint: auto|openrouter|ollama|stub")
+    p.add_argument("--ollama-base-url", type=str, default="",
+                    help="Optional Ollama OpenAI-compatible base URL, e.g. http://127.0.0.1:11434/v1")
+    p.add_argument("--ollama-model", type=str, default="",
+                    help="Optional Ollama model name, e.g. llama3.1")
     p.add_argument("--token", type=str, default="",
                     help="Bot token (override .env)")
     p.add_argument("--chat-id", type=str, default="",
@@ -91,6 +102,14 @@ def main():
 
     token = args.token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = args.chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+
+    # Optional LLM routing hints for conversational mode.
+    if args.llm_provider:
+        os.environ["LLM_PROVIDER"] = args.llm_provider.strip().lower()
+    if args.ollama_base_url:
+        os.environ["OLLAMA_BASE_URL"] = args.ollama_base_url.strip()
+    if args.ollama_model:
+        os.environ["OLLAMA_MODEL"] = args.ollama_model.strip()
 
     if not token:
         print("=" * 55)
@@ -146,6 +165,8 @@ def main():
         auto_scan_interval=args.interval,
         notify_on_buy=True,
         notify_on_cycle=args.notify_all,
+        conversational=not args.no_conversation,
+        llm_chat=not args.no_llm_chat,
     )
 
     print("=" * 55)

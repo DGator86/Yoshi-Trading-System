@@ -156,6 +156,8 @@ class TelegramBot:
         auto_scan_interval: float = 60.0,
         notify_on_buy: bool = True,
         notify_on_cycle: bool = False,  # only BUY alerts by default
+        conversational: bool = True,
+        llm_chat: bool = True,
     ):
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -164,12 +166,16 @@ class TelegramBot:
         self.auto_scan_interval = auto_scan_interval
         self.notify_on_buy = notify_on_buy
         self.notify_on_cycle = notify_on_cycle
+        self.conversational = conversational
+        self.llm_chat = llm_chat
 
         self._update_offset = 0
         self._running = False
         self._scan_thread: Optional[threading.Thread] = None
         self._last_cycle_result = None
         self._fmt = MessageFormatter()
+        self._chat_history: Dict[str, List[Dict[str, str]]] = {}
+        self._llm_client = None
 
     # ── Sending ───────────────────────────────────────────
     def send_text(self, text: str, parse_mode: str = "MarkdownV2") -> bool:
@@ -360,6 +366,201 @@ class TelegramBot:
         env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text(content, encoding="utf-8")
 
+    def _append_history(self, chat_id: str, role: str, text: str) -> None:
+        """Keep a tiny rolling chat history for conversational context."""
+        if not chat_id:
+            return
+        hist = self._chat_history.setdefault(chat_id, [])
+        hist.append({"role": role, "text": (text or "")[:600]})
+        if len(hist) > 12:
+            del hist[:-12]
+
+    def _core_get(self, path: str) -> Any:
+        """Read-only helper for Trading Core HTTP endpoints."""
+        base = os.environ.get("TRADING_CORE_URL", "http://127.0.0.1:8000").rstrip("/")
+        url = f"{base}{path}"
+        try:
+            import requests
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+            return None
+        except Exception:
+            return None
+
+    def _reply_positions(self, chat_id: str):
+        positions = self._core_get("/positions")
+        if not isinstance(positions, list):
+            self.api.send_message(chat_id, "Could not fetch positions right now.", "")
+            return
+        if not positions:
+            self.api.send_message(chat_id, "No open positions right now.", "")
+            return
+        lines = [f"Open positions: {len(positions)}"]
+        for p in positions[:5]:
+            order = p.get("order", {}) if isinstance(p, dict) else {}
+            ticker = order.get("ticker") or p.get("ticker", "?")
+            oid = order.get("order_id") or p.get("_local_id", "?")
+            lines.append(f"- {ticker} (order_id={oid})")
+        self.api.send_message(chat_id, "\n".join(lines), "")
+
+    def _reply_orders(self, chat_id: str):
+        orders = self._core_get("/orders")
+        if not isinstance(orders, list):
+            self.api.send_message(chat_id, "Could not fetch orders right now.", "")
+            return
+        if not orders:
+            self.api.send_message(chat_id, "No orders have executed yet.", "")
+            return
+        lines = [f"Recent orders: {len(orders)}"]
+        for o in orders[:5]:
+            order = o.get("order", {}) if isinstance(o, dict) else {}
+            lines.append(
+                f"- {order.get('ticker', '?')} | order_id={order.get('order_id', '?')}"
+            )
+        self.api.send_message(chat_id, "\n".join(lines), "")
+
+    def _reply_signals(self, chat_id: str):
+        proposals = self._core_get("/proposals")
+        if not isinstance(proposals, dict):
+            self.api.send_message(chat_id, "Could not fetch proposal queue right now.", "")
+            return
+        if not proposals:
+            self.api.send_message(chat_id, "No proposals yet. Send /scan to create one.", "")
+            return
+        items = list(proposals.items())[:5]
+        lines = [f"Recent proposals: {len(proposals)}"]
+        for pid, p in items:
+            lines.append(
+                f"- {pid}: {p.get('action', '?')} {p.get('ticker', '?')} "
+                f"edge={float(p.get('edge', 0.0)):+.1%} status={p.get('status', '?')}"
+            )
+        self.api.send_message(chat_id, "\n".join(lines), "")
+
+    def _reply_last_prediction(self, chat_id: str):
+        if self._last_cycle_result is None:
+            self.api.send_message(
+                chat_id,
+                "I don't have an in-memory cycle snapshot yet. Send /scan and ask again.",
+                "",
+            )
+            return
+        d = self._last_cycle_result.to_dict() if hasattr(self._last_cycle_result, "to_dict") else {}
+        fc = d.get("forecast", {}) or {}
+        if not fc:
+            self.api.send_message(chat_id, "Last cycle had no forecast payload.", "")
+            return
+        msg = (
+            f"Latest forecast snapshot ({d.get('timestamp','unknown')}):\n"
+            f"- Symbol: {fc.get('symbol','?')}\n"
+            f"- Current: ${float(fc.get('current_price',0.0)):,.2f}\n"
+            f"- Predicted: ${float(fc.get('predicted_price',0.0)):,.2f}\n"
+            f"- Direction: {fc.get('direction','?')} | Conf: {float(fc.get('confidence',0.0)):.1%}\n"
+            f"- Regime: {fc.get('regime','?')}"
+        )
+        self.api.send_message(chat_id, msg, "")
+
+    def _llm_reply(self, chat_id: str, user_text: str) -> Optional[str]:
+        """Try LLM-backed conversational reply with strict fallback behavior."""
+        if not self.llm_chat:
+            return None
+        try:
+            if self._llm_client is None:
+                from gnosis.reasoning.client import LLMClient
+                self._llm_client = LLMClient()
+            core_status = self._core_get("/status")
+            proposals = self._core_get("/proposals")
+            if isinstance(proposals, dict):
+                proposals = list(proposals.values())[:3]
+            else:
+                proposals = []
+            context = {
+                "scan_interval_seconds": self.auto_scan_interval,
+                "last_cycle": (
+                    self._last_cycle_result.to_dict()
+                    if hasattr(self._last_cycle_result, "to_dict")
+                    else None
+                ),
+                "core_status": core_status,
+                "recent_proposals": proposals,
+                "history": self._chat_history.get(chat_id, [])[-6:],
+            }
+            system = (
+                "You are ClawdBot's conversational assistant. "
+                "Be concise, practical, and accurate. "
+                "Do not claim an order executed unless context explicitly shows it. "
+                "For risky actions (kill switch, pause, flatten), advise explicit command usage."
+            )
+            user = f"User message: {user_text}\n\nContext JSON:\n{json.dumps(context, default=str)[:5000]}"
+            resp = self._llm_client.chat(system_prompt=system, user_prompt=user, max_tokens=450)
+            if resp.error:
+                return None
+            content = (resp.content or "").strip()
+            if not content:
+                return None
+            return content[:3000]
+        except Exception:
+            return None
+
+    def _handle_conversation(self, text: str, chat_id: str):
+        """Natural-language message handling for back-and-forth chat."""
+        msg = (text or "").strip()
+        if not msg:
+            return
+        low = msg.lower()
+        self._append_history(chat_id, "user", msg)
+
+        # Intent shortcuts for common operations.
+        if any(k in low for k in ("run scan", "scan now", "new scan", "predict now", "scan again")):
+            self.api.send_message(chat_id, "Running a fresh scan now...", "")
+            self._force_scan(chat_id)
+            return
+        if any(k in low for k in ("status", "health", "alive", "system check")):
+            self.send_status()
+            return
+        if "position" in low:
+            self._reply_positions(chat_id)
+            return
+        if "order" in low:
+            self._reply_orders(chat_id)
+            return
+        if any(k in low for k in ("proposal", "signal", "edge alert")):
+            self._reply_signals(chat_id)
+            return
+        if any(k in low for k in ("last prediction", "predict at", "what did", "forecast at", "predicted at")):
+            self._reply_last_prediction(chat_id)
+            return
+        if any(k in low for k in ("every minute", "scan interval", "how often", "frequency")):
+            self.api.send_message(
+                chat_id,
+                (
+                    f"Bot conversational/orchestrator scan loop runs every {int(self.auto_scan_interval)}s. "
+                    "The dedicated Yoshi scanner service is separately configured and may use a different interval."
+                ),
+                "",
+            )
+            return
+        if any(k in low for k in ("pause", "resume", "kill switch", "flatten")):
+            self.api.send_message(
+                chat_id,
+                "For safety, use explicit admin controls (/status + Trading Core API endpoints) for risk actions.",
+                "",
+            )
+            return
+
+        llm_text = self._llm_reply(chat_id, msg)
+        if llm_text:
+            self._append_history(chat_id, "assistant", llm_text)
+            self.api.send_message(chat_id, llm_text, "")
+            return
+
+        fallback = (
+            "I can help with status, scans, positions, orders, and recent predictions. "
+            "Try: '/status', '/scan', or ask 'show me positions'."
+        )
+        self._append_history(chat_id, "assistant", fallback)
+        self.api.send_message(chat_id, fallback, "")
+
     def _force_scan(self, chat_id: str):
         """Force a scan cycle and report results."""
         try:
@@ -501,6 +702,8 @@ class TelegramBot:
                         if text.startswith("/"):
                             print(f"[TG] Command: {text} (from {from_chat})")
                             self._handle_command(text, from_chat)
+                        elif self.conversational and text.strip():
+                            self._handle_conversation(text, from_chat)
 
                 except Exception as e:
                     # Network hiccup — wait and retry

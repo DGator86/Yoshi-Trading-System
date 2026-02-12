@@ -29,11 +29,13 @@ from urllib import request, error
 GENSPARK_PROXY_URL = "https://www.genspark.ai/api/llm_proxy/v1"
 OPENAI_DIRECT_URL = "https://api.openai.com/v1"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
+OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434/v1"
 
 # Models per environment
 GENSPARK_MODEL = "gpt-5"        # GenSpark proxy supports gpt-5 family
 OPENAI_MODEL = "gpt-4o-mini"    # Cost-effective default for direct OpenAI
 OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"  # Best free model
+OLLAMA_MODEL = "llama3.1"
 
 
 _PLACEHOLDER_PREFIXES = ("your_", "replace", "REPLACE", "xxx", "changeme", "TODO")
@@ -166,19 +168,51 @@ class LLMConfig:
             config._environment = "genspark"
             return config
 
-        # ── Try environment variables ──────────────────────────
+        # ── Try environment variables + .env fallback ──────────
         env_key = os.environ.get("OPENAI_API_KEY", "")
         env_url = os.environ.get("OPENAI_BASE_URL", "")
         env_model = os.environ.get("OPENAI_MODEL", "")
+        provider_hint = os.environ.get("LLM_PROVIDER", "").strip().lower()
+        ollama_url = os.environ.get("OLLAMA_BASE_URL", "") or os.environ.get("OLLAMA_HOST", "")
+        ollama_model = os.environ.get("OLLAMA_MODEL", "")
+        ollama_key = os.environ.get("OLLAMA_API_KEY", "") or os.environ.get("OLLAMA_CLOUD_API_KEY", "")
 
-        # ── Try .env file fallback ─────────────────────────────
+        dotenv = _load_dotenv()
         if not env_key:
-            dotenv = _load_dotenv()
             env_key = dotenv.get("OPENAI_API_KEY", "")
-            if not env_url:
-                env_url = dotenv.get("OPENAI_BASE_URL", "")
-            if not env_model:
-                env_model = dotenv.get("OPENAI_MODEL", "")
+        if not env_url:
+            env_url = dotenv.get("OPENAI_BASE_URL", "")
+        if not env_model:
+            env_model = dotenv.get("OPENAI_MODEL", "")
+        if not provider_hint:
+            provider_hint = dotenv.get("LLM_PROVIDER", "").strip().lower()
+        if not ollama_url:
+            ollama_url = dotenv.get("OLLAMA_BASE_URL", "") or dotenv.get("OLLAMA_HOST", "")
+        if not ollama_model:
+            ollama_model = dotenv.get("OLLAMA_MODEL", "")
+        if not ollama_key:
+            ollama_key = dotenv.get("OLLAMA_API_KEY", "") or dotenv.get("OLLAMA_CLOUD_API_KEY", "")
+
+        def _normalize_ollama_url(raw_url: str) -> str:
+            if not raw_url:
+                return OLLAMA_DEFAULT_URL
+            u = raw_url.rstrip("/")
+            # Accept native endpoint hints and normalize to OpenAI-compatible base.
+            if u.endswith("/api/chat"):
+                u = u[:-9]
+            elif u.endswith("/api"):
+                u = u[:-4]
+            if not u.endswith("/v1"):
+                u = u + "/v1"
+            return u
+
+        # ── Ollama explicit mode (no auth required) ────────────
+        if provider_hint == "ollama" or ollama_url:
+            config.base_url = _normalize_ollama_url(ollama_url)
+            config.model = ollama_model or env_model or OLLAMA_MODEL
+            config.api_key = ollama_key  # optional; keep empty for local Ollama
+            config._environment = "ollama"
+            return config
 
         if env_key:
             config.api_key = env_key
@@ -217,10 +251,23 @@ class LLMConfig:
                           f"Unset OPENAI_BASE_URL or use a gsk-* key for GenSpark.",
                           file=sys.stderr)
             else:
-                # Non-sk key without URL → could be GenSpark token set via env
-                config.base_url = GENSPARK_PROXY_URL
-                config.model = env_model or GENSPARK_MODEL
-                config._environment = "genspark_env"
+                # Non-sk key handling:
+                # 1) If a custom URL exists, use it (works for many OpenAI-compatible providers)
+                # 2) If provider_hint explicitly says "stub", disable live calls
+                # 3) Else fallback to GenSpark proxy behavior.
+                if env_url:
+                    config.base_url = env_url
+                    config.model = env_model or OPENAI_MODEL
+                    config._environment = "custom_non_sk"
+                elif provider_hint == "stub":
+                    config.base_url = ""
+                    config.model = "stub"
+                    config.api_key = ""
+                    config._environment = "stub"
+                else:
+                    config.base_url = GENSPARK_PROXY_URL
+                    config.model = env_model or GENSPARK_MODEL
+                    config._environment = "genspark_env"
 
             return config
 
@@ -239,6 +286,8 @@ class LLMConfig:
 
     @property
     def is_configured(self) -> bool:
+        if self._environment == "ollama":
+            return bool(self.base_url and self.model)
         return bool(self.api_key and self.base_url)
 
 
@@ -330,13 +379,13 @@ class LLMClient:
 
         for attempt in range(self.config.max_retries + 1):
             try:
+                headers = {"Content-Type": "application/json"}
+                if self.config.api_key:
+                    headers["Authorization"] = f"Bearer {self.config.api_key}"
                 req = request.Request(
                     endpoint,
                     data=body,
-                    headers={
-                        "Authorization": f"Bearer {self.config.api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=headers,
                     method="POST",
                 )
                 with request.urlopen(

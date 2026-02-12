@@ -186,7 +186,7 @@ User=root
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
 Environment=PYTHONPATH=$APP_DIR
-ExecStart=$py yoshi-bot/scripts/kalshi_scanner.py --symbol BTCUSDT --loop --bridge --live
+ExecStart=$py yoshi-bot/scripts/kalshi_scanner.py --symbol BTCUSDT --loop --interval 60 --bridge --live
 Restart=always
 RestartSec=10
 StandardOutput=journal

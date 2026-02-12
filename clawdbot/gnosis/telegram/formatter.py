@@ -251,6 +251,8 @@ class MessageFormatter:
             "/chatid — Show (and save) your chat id\n"
             "/help — This message\n"
             "\n"
+            "You can also send normal messages (e.g. 'show positions' or 'run scan now').\n"
+            "\n"
             "_Alerts are sent automatically when BUY signals appear\\._"
         )
 

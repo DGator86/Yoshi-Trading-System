@@ -5,7 +5,7 @@ After=trading-core.service
 [Service]
 User=root
 WorkingDirectory=/root/Yoshi-Trading-System
-ExecStart=/usr/bin/python3 yoshi-bot/scripts/kalshi_scanner.py --symbol BTCUSDT --loop --bridge --live
+ExecStart=/usr/bin/python3 yoshi-bot/scripts/kalshi_scanner.py --symbol BTCUSDT --loop --interval 60 --bridge --live
 Restart=always
 RestartSec=10
 StandardOutput=journal
