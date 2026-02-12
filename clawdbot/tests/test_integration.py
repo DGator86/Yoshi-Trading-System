@@ -948,6 +948,7 @@ def t55():
     fmt = MessageFormatter()
     msg = fmt.help_message()
     assert "/scan" in msg
+    assert "/backtest" in msg
     assert "/status" in msg
     assert "/ralph" in msg
     assert "/params" in msg
@@ -1051,6 +1052,24 @@ def t60():
     assert "Something" in msg
     assert isinstance(msg, str)
 test(60, "Telegram: error_message formatting", t60)
+
+
+def t60b():
+    from gnosis.telegram.bot import TelegramBot
+    sent: list[str] = []
+
+    class _DummyAPI:
+        def send_message(self, _chat_id, text, _parse_mode=""):
+            sent.append(str(text))
+            return {}
+
+    bot = TelegramBot(token="123456:ABCtest", chat_id="12345", llm_chat=False)
+    bot.api = _DummyAPI()
+    bot._handle_conversation("Can you run backtests?", "12345")
+    assert sent, "expected a response"
+    assert "Backtest summary" in sent[-1] or "no resolved signal outcomes yet" in sent[-1].lower()
+
+test(60.1, "Telegram: conversational backtest intent", t60b)
 
 
 # ── Syntax Check ─────────────────────────────────────────────

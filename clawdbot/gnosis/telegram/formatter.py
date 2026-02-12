@@ -245,6 +245,7 @@ class MessageFormatter:
             "\n"
             "Commands:\n"
             "/scan — Run a scan cycle now\n"
+            "/backtest — Signal quality summary from resolved outcomes\n"
             "/status — System status\n"
             "/ralph — Ralph learning state\n"
             "/params — Current hyperparameters\n"

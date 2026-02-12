@@ -303,6 +303,9 @@ class TelegramBot:
         elif cmd == "/params":
             self._send_params(chat_id)
 
+        elif cmd in ("/backtest", "/bt"):
+            self._reply_backtest(chat_id)
+
         else:
             self.api.send_message(chat_id, f"Unknown command: {text.split()[0]}\nTry /help", "")
 
@@ -460,6 +463,112 @@ class TelegramBot:
         )
         self.api.send_message(chat_id, msg, "")
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _signal_data_paths(self, filename: str) -> list[Path]:
+        roots = [
+            Path(os.getcwd()),
+            Path("/root/Yoshi-Trading-System"),
+            Path("/root/Yoshi-Bot"),
+            Path("/home/root/Yoshi-Trading-System"),
+            Path("/home/root/Yoshi-Bot"),
+        ]
+        # Preserve order while deduplicating.
+        seen: set[str] = set()
+        paths: list[Path] = []
+        for root in roots:
+            p = (root / "data" / "signals" / filename).resolve()
+            key = str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(p)
+        return paths
+
+    def _load_recent_signal_outcomes(self, max_rows: int = 200) -> tuple[list[dict[str, Any]], Optional[Path]]:
+        for path in self._signal_data_paths("signal_outcomes.jsonl"):
+            if not path.exists():
+                continue
+            rows: list[dict[str, Any]] = []
+            try:
+                with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(row, dict):
+                            rows.append(row)
+                            if len(rows) > max_rows:
+                                del rows[: len(rows) - max_rows]
+                return rows, path
+            except Exception:
+                continue
+        return [], None
+
+    def _load_json_file(self, filename: str) -> tuple[Optional[dict[str, Any]], Optional[Path]]:
+        for path in self._signal_data_paths(filename):
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+                if isinstance(data, dict):
+                    return data, path
+            except Exception:
+                continue
+        return None, None
+
+    def _format_backtest_summary(self, rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return (
+                "Backtest summary: no resolved signal outcomes yet.\n"
+                "Once contracts settle, I’ll report win rate, avg PnL, and adaptive thresholds."
+            )
+
+        n = len(rows)
+        wins = sum(1 for r in rows if bool(r.get("won")))
+        pnl_values = [self._safe_float(r.get("pnl_cents"), 0.0) for r in rows]
+        avg_pnl = (sum(pnl_values) / n) if n else 0.0
+
+        yes = [r for r in rows if str(r.get("action", "")).upper() == "BUY_YES"]
+        no = [r for r in rows if str(r.get("action", "")).upper() == "BUY_NO"]
+        yes_wr = (sum(1 for r in yes if bool(r.get("won"))) / len(yes)) if yes else 0.0
+        no_wr = (sum(1 for r in no if bool(r.get("won"))) / len(no)) if no else 0.0
+
+        policy, _ = self._load_json_file("learned_policy.json")
+        state, _ = self._load_json_file("learning_state.json")
+        pending = len((state or {}).get("pending", {})) if isinstance(state, dict) else 0
+
+        lines = [
+            f"Backtest summary (last {n} resolved):",
+            f"- Win rate: {wins / n:.1%}",
+            f"- Avg PnL: {avg_pnl:+.1f}c per signal",
+            f"- BUY_YES: n={len(yes)}, win={yes_wr:.1%}",
+            f"- BUY_NO: n={len(no)}, win={no_wr:.1%}",
+        ]
+        if isinstance(policy, dict):
+            yes_thr = self._safe_float(policy.get("min_edge_buy_yes"), 0.10)
+            no_thr = self._safe_float(policy.get("min_edge_buy_no"), 0.13)
+            mode = str(policy.get("mode", "learning"))
+            lines.append(
+                f"- Active thresholds: BUY_YES >= {yes_thr:.1%}, BUY_NO <= -{no_thr:.1%} ({mode})"
+            )
+        lines.append(f"- Pending unresolved signals: {pending}")
+        return "\n".join(lines)
+
+    def _reply_backtest(self, chat_id: str):
+        rows, _ = self._load_recent_signal_outcomes(max_rows=300)
+        msg = self._format_backtest_summary(rows)
+        self.api.send_message(chat_id, msg, "")
+
     def _llm_reply(self, chat_id: str, user_text: str) -> Optional[str]:
         """Try LLM-backed conversational reply with strict fallback behavior."""
         if not self.llm_chat:
@@ -495,6 +604,9 @@ class TelegramBot:
             resp = self._llm_client.chat(system_prompt=system, user_prompt=user, max_tokens=450)
             if resp.error:
                 return None
+            if getattr(resp, "is_stub", False):
+                # Stub mode should still feel conversational, not JSON-dumpy.
+                return None
             content = (resp.content or "").strip()
             if not content:
                 return None
@@ -511,9 +623,20 @@ class TelegramBot:
         self._append_history(chat_id, "user", msg)
 
         # Intent shortcuts for common operations.
+        if re.search(r"\b(hello|hi|hey|yo|sup|what'?s up)\b", low):
+            self.api.send_message(
+                chat_id,
+                "Hey — I’m here. I can chat, run scans, and summarize live backtest quality. "
+                "Try: 'run a scan now' or 'show backtest summary'.",
+                "",
+            )
+            return
         if any(k in low for k in ("run scan", "scan now", "new scan", "predict now", "scan again")):
             self.api.send_message(chat_id, "Running a fresh scan now...", "")
             self._force_scan(chat_id)
+            return
+        if any(k in low for k in ("backtest", "back test", "win rate", "signal quality", "learning summary")):
+            self._reply_backtest(chat_id)
             return
         if any(k in low for k in ("status", "health", "alive", "system check")):
             self.send_status()
@@ -555,8 +678,13 @@ class TelegramBot:
             return
 
         fallback = (
-            "I can help with status, scans, positions, orders, and recent predictions. "
-            "Try: '/status', '/scan', or ask 'show me positions'."
+            "I can chat here, and also handle trading ops.\n"
+            "Try one of these:\n"
+            "- /scan\n"
+            "- /backtest\n"
+            "- /status\n"
+            "- 'show positions' or 'show orders'\n"
+            "- 'what was the last prediction?'"
         )
         self._append_history(chat_id, "assistant", fallback)
         self.api.send_message(chat_id, fallback, "")
