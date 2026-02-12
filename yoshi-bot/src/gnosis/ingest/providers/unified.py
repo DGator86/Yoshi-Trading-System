@@ -54,10 +54,30 @@ class UnifiedConfig:
         Returns:
             UnifiedConfig with values from environment
         """
+        def _first_env(*names: str) -> Optional[str]:
+            for n in names:
+                v = os.getenv(n)
+                if v:
+                    return v
+            return None
+
         return cls(
-            coingecko_api_key=os.getenv("COINGECKO_API_KEY"),
-            coinmarketcap_api_key=os.getenv("COINMARKETCAP_API_KEY"),
-            coinapi_api_key=os.getenv("COINAPI_API_KEY") or os.getenv("CRYPTO_API_KEY"),
+            coingecko_api_key=_first_env(
+                "COINGECKO_API_KEY",
+                "COINGECKO_KEY",
+                "COIN_GECKO_API_KEY",
+            ),
+            coinmarketcap_api_key=_first_env(
+                "COINMARKETCAP_API_KEY",
+                "COINMARKETCAP_KEY",
+                "CMC_API_KEY",
+            ),
+            coinapi_api_key=_first_env(
+                "COINAPI_API_KEY",
+                "COINAPI_KEY",
+                "COIN_API_KEY",
+                "CRYPTO_API_KEY",
+            ),
             cache_dir=os.getenv("DATA_CACHE_DIR"),
         )
 

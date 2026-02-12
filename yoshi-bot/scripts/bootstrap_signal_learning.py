@@ -16,6 +16,11 @@ from pathlib import Path
 # Add yoshi-bot root to import path for `src.*` imports.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:  # pragma: no cover - optional dependency fallback
+    load_dotenv = None
+
 from src.gnosis.execution.historical_learning import (  # type: ignore
     HistoricalBootstrapConfig,
     bootstrap_learning_from_api,
@@ -43,6 +48,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    # Load local .env when script is run manually from shell.
+    if load_dotenv is not None:
+        try:
+            load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+            load_dotenv()
+        except Exception:
+            pass
+
     args = parse_args()
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     if not symbols:

@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.gnosis.ingest.providers.binance_public import _epoch_to_datetime_utc  # noqa: E402
 from src.gnosis.ingest.providers.coingecko import CoinGeckoProvider  # noqa: E402
+from src.gnosis.ingest.providers.unified import UnifiedConfig  # noqa: E402
 
 
 def test_binance_epoch_parser_handles_microseconds():
@@ -29,3 +30,17 @@ def test_coingecko_ohlc_days_coercion():
     assert CoinGeckoProvider._coerce_ohlc_days(8) == 14
     assert CoinGeckoProvider._coerce_ohlc_days(120) == 180
     assert CoinGeckoProvider._coerce_ohlc_days(1000) == 365
+
+
+def test_unified_config_accepts_common_key_aliases(monkeypatch):
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    monkeypatch.delenv("COINMARKETCAP_API_KEY", raising=False)
+    monkeypatch.delenv("COINAPI_API_KEY", raising=False)
+    monkeypatch.setenv("COINGECKO_KEY", "cg_demo")
+    monkeypatch.setenv("CMC_API_KEY", "cmc_demo")
+    monkeypatch.setenv("COINAPI_KEY", "coinapi_demo")
+
+    cfg = UnifiedConfig.from_env()
+    assert cfg.coingecko_api_key == "cg_demo"
+    assert cfg.coinmarketcap_api_key == "cmc_demo"
+    assert cfg.coinapi_api_key == "coinapi_demo"
