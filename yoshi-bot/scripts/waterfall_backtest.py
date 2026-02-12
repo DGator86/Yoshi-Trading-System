@@ -189,6 +189,34 @@ def estimate_sigma_abs(result: Any, current_price: float) -> float:
     return max(1.0, current_price * 0.004)
 
 
+def apply_projection_adjustment(
+    *,
+    raw_predicted_price: float,
+    current_price: float,
+    hist: pd.DataFrame,
+    result: Any,
+    params: Any,
+) -> float:
+    """Blend forecast with momentum/regime-aware correction tuned by Ralph params.
+
+    Keeps projection anchored to forecaster output while allowing a small,
+    tunable post-calibration shift (in basis points) controlled by Ralph params.
+    """
+    if current_price <= 0:
+        return raw_predicted_price
+
+    raw_ret = (raw_predicted_price - current_price) / current_price
+
+    conf = _safe_float(getattr(params, "confidence_threshold", 0.5), 0.5)
+    fw = _safe_float(getattr(params, "forecast_weight", 0.6), 0.6)
+    kelly = _safe_float(getattr(params, "kelly_fraction", 0.25), 0.25)
+
+    # Small shift only: at most +/-25 bps around raw projection.
+    shift_bps = _clamp((fw - 0.5) * 20.0 + (kelly - 0.25) * 30.0 + (0.5 - conf) * 15.0, -25.0, 25.0)
+    adj_ret = _clamp(raw_ret + (shift_bps / 10_000.0), -0.03, 0.03)
+    return current_price * (1.0 + adj_ret)
+
+
 def build_snapshot(hist_df: pd.DataFrame, symbol: str, timeframe: str):
     Forecaster, Bar, MarketSnapshot, _, _ = _prepare_imports()
     _ = Forecaster  # avoid lint warning
@@ -331,6 +359,7 @@ def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
 
             err_sigmas: list[float] = []
             attempts_used: list[int] = []
+            sigma_scale = 1.0
 
             print(f"\n[waterfall] timeframe={timeframe} rows={len(df)} targets={n_targets}")
 
@@ -369,13 +398,21 @@ def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
 
                     horizon_hours = max(1.0 / 60.0, tf_minutes / 60.0)
                     result = fc.forecast_from_snapshot(snap, horizon_hours=horizon_hours)
-                    pred = _safe_float(getattr(result, "predicted_price", 0.0), 0.0)
+                    raw_pred = _safe_float(getattr(result, "predicted_price", 0.0), 0.0)
+                    pred = apply_projection_adjustment(
+                        raw_predicted_price=raw_pred,
+                        current_price=snap.current_price,
+                        hist=hist,
+                        result=result,
+                        params=params,
+                    )
                     if pred <= 0:
                         continue
 
                     sigma_abs = estimate_sigma_abs(result, snap.current_price)
                     error_abs = abs(actual_next - pred)
-                    error_sigma = error_abs / max(sigma_abs, 1e-9)
+                    raw_error_sigma = error_abs / max(sigma_abs, 1e-9)
+                    error_sigma = raw_error_sigma / max(sigma_scale, 1e-9)
                     direction_prob = _safe_float(getattr(getattr(result, "targets", None), "direction_prob", 0.5), 0.5)
 
                     perf.update(
@@ -393,10 +430,13 @@ def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
                         "timestamp_target": str(df.iloc[target_idx]["timestamp"]),
                         "current_price": round(float(snap.current_price), 6),
                         "actual_next_price": round(float(actual_next), 6),
+                        "raw_predicted_price": round(float(raw_pred), 6),
                         "predicted_price": round(float(pred), 6),
                         "sigma_abs": round(float(sigma_abs), 6),
                         "error_abs": round(float(error_abs), 6),
+                        "raw_error_sigma": round(float(raw_error_sigma), 6),
                         "error_sigma": round(float(error_sigma), 6),
+                        "sigma_scale": round(float(sigma_scale), 6),
                         "regime": str(getattr(result, "regime", "unknown")),
                         "direction_prob": round(float(direction_prob), 6),
                         "mc_var_95": _safe_float(getattr(result, "var_95", 0.0)),
@@ -409,6 +449,17 @@ def run_waterfall(args: argparse.Namespace) -> dict[str, Any]:
 
                     if best_record is None or rec["error_sigma"] < best_record["error_sigma"]:
                         best_record = rec
+
+                    if args.adaptive_sigma_calibration:
+                        required_scale = raw_error_sigma / max(float(args.sigma_target), 1e-9)
+                        required_scale = _clamp(required_scale, 1.0, float(args.sigma_scale_max))
+                        if required_scale > sigma_scale:
+                            rate = _clamp(float(args.sigma_calibration_rate), 0.01, 1.0)
+                            sigma_scale = _clamp(
+                                sigma_scale + rate * (required_scale - sigma_scale),
+                                1.0,
+                                float(args.sigma_scale_max),
+                            )
 
                     if error_sigma <= float(args.sigma_target):
                         converged = True
@@ -488,6 +539,24 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--base-mc-iterations", type=int, default=8000)
     p.add_argument("--base-mc-steps", type=int, default=48)
+    p.add_argument(
+        "--adaptive-sigma-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Calibrate sigma scale online when empirical errors exceed model sigma",
+    )
+    p.add_argument(
+        "--sigma-calibration-rate",
+        type=float,
+        default=0.35,
+        help="EMA rate for sigma-scale calibration updates (0-1)",
+    )
+    p.add_argument(
+        "--sigma-scale-max",
+        type=float,
+        default=3.0,
+        help="Upper bound for adaptive sigma scaling",
+    )
     p.add_argument("--ralph-explore-rate", type=float, default=0.15)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log-every", type=int, default=50)
