@@ -25,6 +25,13 @@ S:
     - S_SWEEP_DOWN_REVERT
     - S_UNCERTAIN
 
+# Classifier thresholds (tunable by Ralph)
+temperature: 2.0
+k_trending_mult: 1.5
+k_mr_mult: 0.5
+p_expand_mult: 1.2
+p_contract_mult: 0.8
+
 constraints_by_species:
   S_UNCERTAIN:
     confidence_floor: 0.0

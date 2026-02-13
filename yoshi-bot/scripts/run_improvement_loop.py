@@ -91,7 +91,12 @@ class YoshiEvaluator:
 
         features_df = compute_features(bars_df, extended=True)
 
-        regimes_cfg = config.get("regimes", {"confidence_floor": 0.65})
+        regimes_cfg = config.get("regimes", {
+            "confidence_floor": 0.65,
+            "temperature": 2.0,
+            "k_trending_mult": 1.5,
+            "k_mr_mult": 0.5,
+        })
         classifier = KPCOFGSClassifier(regimes_cfg)
         features_df = classifier.classify(features_df)
 
@@ -229,7 +234,14 @@ def main():
 
     base_config = {
         "domains": {"domains": {"D0": {"n_trades": 200}}},
-        "regimes": {"confidence_floor": 0.65},
+        "regimes": {
+            "confidence_floor": 0.65,
+            "temperature": 2.0,
+            "k_trending_mult": 1.5,
+            "k_mr_mult": 0.5,
+            "p_expand_mult": 1.2,
+            "p_contract_mult": 0.8,
+        },
         "models": {
             "predictor": {
                 "backend": "gradient_boost",
@@ -248,8 +260,22 @@ def main():
                 "velocity_span": 5,
                 "acceleration_span": 3,
                 "potential_lookback": 50,
-            }
-        }
+            },
+        },
+        "manifold": {
+            "price_resolution": 173,
+            "decay_rate": 0.656,
+            "sigma_supply": 0.018,
+            "sigma_demand": 0.016,
+            "df_supply": 4.0,
+            "df_demand": 4.0,
+        },
+        "physics": {
+            "gravity_g": 1e-5,
+            "spring_k": 0.3,
+            "jump_magnitude": 0.02,
+            "volatility_floor": 0.015,
+        },
     }
 
     print("\nInitializing evaluator...")

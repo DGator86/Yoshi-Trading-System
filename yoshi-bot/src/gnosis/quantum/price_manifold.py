@@ -8,7 +8,7 @@ Models price as a quantum particle in the price-time manifold where:
 This is timescale-agnostic - works from 1m bars to daily bars.
 """
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import Any, List, Dict
 
 import numpy as np
 import pandas as pd
@@ -46,6 +46,9 @@ class PriceTimeManifold:
 
     The price at any moment is the result of wavefunction collapse
     at the intersection of supply and demand probability distributions.
+
+    Uses Student-t distributions instead of Gaussian to capture
+    fat-tailed behavior observed in crypto price movements.
     """
 
     def __init__(
@@ -54,14 +57,78 @@ class PriceTimeManifold:
         decay_rate: float = 0.656,     # Optimized
         sigma_supply: float = 0.018,   # Optimized
         sigma_demand: float = 0.016,   # Optimized
+        df_supply: float = 4.0,        # Degrees of freedom for supply t-dist
+        df_demand: float = 4.0,        # Degrees of freedom for demand t-dist
     ):
         self.price_resolution = price_resolution
         self.decay_rate = decay_rate
         self.sigma_supply = sigma_supply
         self.sigma_demand = sigma_demand
+        self.df_supply = df_supply
+        self.df_demand = df_demand
 
         self._states: List[WavefunctionState] = []
         self._manifold_points: List[ManifoldPoint] = []
+
+    @classmethod
+    def from_params(cls, params: Dict[str, Any]) -> "PriceTimeManifold":
+        """Create a PriceTimeManifold from a Ralph params dict.
+
+        Supports both flat keys (manifold.sigma_supply) and nested dicts.
+        Falls back to defaults for any missing key.
+        """
+        flat: Dict[str, Any] = {}
+        for k, v in params.items():
+            if isinstance(v, dict):
+                for k2, v2 in v.items():
+                    flat[f"{k}.{k2}"] = v2
+            else:
+                flat[k] = v
+
+        def _get(key: str, default):
+            for prefix in ("manifold.", ""):
+                full = f"{prefix}{key}"
+                if full in flat:
+                    return type(default)(flat[full])
+            return default
+
+        return cls(
+            price_resolution=_get("price_resolution", 173),
+            decay_rate=_get("decay_rate", 0.656),
+            sigma_supply=_get("sigma_supply", 0.018),
+            sigma_demand=_get("sigma_demand", 0.016),
+            df_supply=_get("df_supply", 4.0),
+            df_demand=_get("df_demand", 4.0),
+        )
+
+    def apply_params(self, params: Dict[str, Any]) -> None:
+        """Update manifold parameters in-place from a Ralph params dict."""
+        flat: Dict[str, Any] = {}
+        for k, v in params.items():
+            if isinstance(v, dict):
+                for k2, v2 in v.items():
+                    flat[f"{k}.{k2}"] = v2
+            else:
+                flat[k] = v
+
+        for key in ("manifold.price_resolution", "price_resolution"):
+            if key in flat:
+                self.price_resolution = int(flat[key])
+        for key in ("manifold.decay_rate", "decay_rate"):
+            if key in flat:
+                self.decay_rate = float(flat[key])
+        for key in ("manifold.sigma_supply", "sigma_supply"):
+            if key in flat:
+                self.sigma_supply = float(flat[key])
+        for key in ("manifold.sigma_demand", "sigma_demand"):
+            if key in flat:
+                self.sigma_demand = float(flat[key])
+        for key in ("manifold.df_supply", "df_supply"):
+            if key in flat:
+                self.df_supply = float(flat[key])
+        for key in ("manifold.df_demand", "df_demand"):
+            if key in flat:
+                self.df_demand = float(flat[key])
 
     def fit_from_1m_bars(self, ohlcv_df: pd.DataFrame) -> "PriceTimeManifold":
         """Construct manifold from 1-minute OHLCV bars.
@@ -105,29 +172,26 @@ class PriceTimeManifold:
         sell_vol = bar.get('sell_volume', 0.5)
         total_vol = buy_vol + sell_vol + 1e-10
 
-        # Supply wavefunction (Sellers)
+        # Supply wavefunction (Sellers) - Student-t for fat tails
         supply_center = high_p
         supply_amplitude = 0.5 + sell_vol / total_vol
         # Dynamic width based on bar volatility
         s_sigma = self.sigma_supply * (high_p - low_p) / (price_range + 1e-10)
         s_sigma = max(s_sigma, 1e-5)
 
-        supply_psi = supply_amplitude * np.exp(
-            -0.5 * ((price_grid - supply_center) /
-                    (s_sigma * price_range + 1e-10)) ** 2
-        )
+        # Student-t PDF captures crypto's fat tails better than Gaussian
+        z_supply = (price_grid - supply_center) / (s_sigma * price_range + 1e-10)
+        supply_psi = supply_amplitude * stats.t.pdf(z_supply, df=self.df_supply)
         supply_psi /= supply_psi.sum() + 1e-10
 
-        # Demand wavefunction (Buyers)
+        # Demand wavefunction (Buyers) - Student-t for fat tails
         demand_center = low_p
         demand_amplitude = 0.5 + buy_vol / total_vol
         d_sigma = self.sigma_demand * (high_p - low_p) / (price_range + 1e-10)
         d_sigma = max(d_sigma, 1e-5)
 
-        demand_psi = demand_amplitude * np.exp(
-            -0.5 * ((price_grid - demand_center) /
-                    (d_sigma * price_range + 1e-10)) ** 2
-        )
+        z_demand = (price_grid - demand_center) / (d_sigma * price_range + 1e-10)
+        demand_psi = demand_amplitude * stats.t.pdf(z_demand, df=self.df_demand)
         demand_psi /= demand_psi.sum() + 1e-10
 
         # Overlap and Intersection
@@ -285,10 +349,12 @@ class PriceTimeManifold:
             drift = total_f * h * (1 + energy)
             diffusion = vol * np.sqrt(h)
 
-            # Monte Carlo paths
-            shocks = np.random.normal(0, 1, n_sims)
+            # Monte Carlo paths with fat-tailed shocks (Student-t, df=5)
+            # Student-t with ~5 df matches empirical crypto return distributions
+            shocks = np.random.standard_t(df=5, size=n_sims)
             sim_rets = drift + diffusion * shocks
-            sim_prices = cur_p * np.exp(np.clip(sim_rets, -0.5, 0.5))
+            # Widen clip range: -0.5/+0.5 is 50%, too narrow for hourly crypto
+            sim_prices = cur_p * np.exp(np.clip(sim_rets, -0.30, 0.30))
 
             results[h] = {
                 'mean': np.mean(sim_prices),
@@ -309,22 +375,52 @@ class PriceTimeManifold:
         horizon_bars: int,
         n_sims: int = 5000
     ) -> Dict[str, float]:
-        """Calculate probability of price > strike for Kalshi-style markets."""
+        """Calculate probability of price > strike for Kalshi-style markets.
+
+        Unlike predict_probabilistic which computes prob above *current price*,
+        this method computes prob above the specific *strike price*.
+        """
         if not self._states:
             return {"prob": 0.5, "median": 0.0}
 
-        res = self.predict_probabilistic(
-            len(self._states) - 1,
-            [horizon_bars],
-            n_sims
-        )
+        state = self._states[-1]
+        cur_p = state.collapsed_price
 
-        sim_data = res[horizon_bars]
+        # Run the same simulation as predict_probabilistic but compute
+        # probability relative to strike, not current price
+        lookback = 10
+        h_states = self._states[max(0, len(self._states)-lookback-1):]
+        hist = np.array([s.collapsed_price for s in h_states])
+        rets = np.diff(np.log(hist + 1e-10))
+
+        vol = np.std(rets) if len(rets) > 1 else 0.001
+        moms = np.mean(rets) if len(rets) > 1 else 0
+
+        # Physics Forces
+        f_pressure = -state.asymmetry
+        f_revert = (state.overlap_peak_price - cur_p) / (cur_p + 1e-10)
+        energy = 0.5 * (moms / (vol + 1e-10))**2
+
+        # Net Force
+        total_f = (0.6 * f_pressure) + (0.3 * f_revert) + (0.1 * moms)
+
+        h = horizon_bars
+        drift = total_f * h * (1 + energy)
+        diffusion = vol * np.sqrt(h)
+
+        # Fat-tailed shocks
+        shocks = np.random.standard_t(df=5, size=n_sims)
+        sim_rets = drift + diffusion * shocks
+        sim_prices = cur_p * np.exp(np.clip(sim_rets, -0.30, 0.30))
+
+        # Compute probability above STRIKE (not current price)
+        prob_above_strike = float(np.mean(sim_prices > strike))
+
         return {
-            'prob': sim_data['prob_above'],
-            'median': sim_data['median'],
-            'upper_90': sim_data['upper_90'],
-            'lower_90': sim_data['lower_90']
+            'prob': prob_above_strike,
+            'median': float(np.median(sim_prices)),
+            'upper_90': float(np.percentile(sim_prices, 95)),
+            'lower_90': float(np.percentile(sim_prices, 5))
         }
 
     def compute_accuracy_metrics(

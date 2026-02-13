@@ -15,6 +15,10 @@ Outputs probabilistic forecasts with confidence intervals.
 
 All steering field parameters are exposed as hyperparameters for ML tuning.
 """
+import json
+import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
@@ -135,10 +139,11 @@ class QuantumPriceEngine:
     }
 
     # Physics constants
-    GRAVITY_G = 1e-8          # Order book gravitational constant (reduced)
-    SPRING_K = 0.5            # VWAP mean reversion strength (much weaker)
-    JUMP_MAGNITUDE = 0.015    # Average jump size (1.5%)
-    VOLATILITY_FLOOR = 0.02   # Minimum hourly volatility (2%)
+    # Gravity was 1e-8 (negligible). Increased so order book actually matters.
+    GRAVITY_G = 1e-5          # Order book gravitational constant
+    SPRING_K = 0.3            # VWAP mean reversion strength (moderate)
+    JUMP_MAGNITUDE = 0.02     # Average jump size (2% - matches BTC hourly tails)
+    VOLATILITY_FLOOR = 0.015  # Minimum hourly volatility (1.5%)
 
     def __init__(
         self,
@@ -157,51 +162,94 @@ class QuantumPriceEngine:
         if random_seed is not None:
             np.random.seed(random_seed)
 
-        # Hot-reload state
-        self.param_store_path = "/root/Yoshi-Bot/config/params.json"
+        # Hot-reload state - check multiple paths for params.json
+        self.param_store_path = "config/params.json"
+        for candidate_path in [
+            "config/params.json",
+            "/root/Yoshi-Bot/config/params.json",
+            str(Path(__file__).resolve().parents[3] / "config" / "params.json"),
+        ]:
+            if os.path.exists(candidate_path):
+                self.param_store_path = candidate_path
+                break
         self._last_param_version = 0
         self._reload_every_n_cycles = 10
         self._cycle_count = 0
 
-    def maybe_reload_params(self):
-        """Check if Ralph has published new params. Non-blocking."""
+    def maybe_reload_params(self) -> Dict[str, Any]:
+        """Check if Ralph has published new params. Non-blocking.
+
+        Returns the full params dict if reloaded, empty dict otherwise.
+        Other engines (PriceTimeManifold, KPCOFGSClassifier) can use
+        the returned dict to update their own parameters.
+        """
         self._cycle_count += 1
         if self._cycle_count % self._reload_every_n_cycles != 0:
-            return
-        
+            return {}
+
         try:
-            import json
-            import os
             if not os.path.exists(self.param_store_path):
-                # Try local path if root path fails (for dev)
-                local_path = "config/params.json"
-                if os.path.exists(local_path):
-                    self.param_store_path = local_path
-                else:
-                    return
+                return {}
 
             with open(self.param_store_path, "r") as f:
                 store = json.load(f)
-            
+
             if store.get("version", 0) > self._last_param_version:
-                self._apply_params(store.get("params", {}))
+                params = store.get("params", {})
+                self._apply_params(params)
                 self._last_param_version = store["version"]
-                # Use print or logger
                 print(f"Hot-reloaded params v{self._last_param_version} from Ralph")
+                return params
         except Exception:
             pass
+        return {}
             
     def _apply_params(self, params: Dict[str, Any]):
-        """Update physics constants."""
-        # Update class constants if present
-        if "gravity_g" in params: self.GRAVITY_G = params["gravity_g"]
-        if "spring_k" in params: self.SPRING_K = params["spring_k"]
-        if "jump_magnitude" in params: self.JUMP_MAGNITUDE = params["jump_magnitude"]
-        
-        # Update regime params if structure matches
-        if "regime_params" in params:
-            # logic to update REGIME_PARAMS
-            pass
+        """Update physics constants and regime parameters from Ralph's optimized values.
+
+        Supports both flat keys (physics.gravity_g) and nested dict structures.
+        """
+        # Flatten nested dicts: {"physics": {"gravity_g": 1e-5}} -> {"physics.gravity_g": 1e-5}
+        flat = {}
+        for k, v in params.items():
+            if isinstance(v, dict):
+                for k2, v2 in v.items():
+                    flat[f"{k}.{k2}"] = v2
+            else:
+                flat[k] = v
+
+        # Physics constants
+        for key in ("gravity_g", "physics.gravity_g"):
+            if key in flat:
+                self.GRAVITY_G = float(flat[key])
+        for key in ("spring_k", "physics.spring_k"):
+            if key in flat:
+                self.SPRING_K = float(flat[key])
+        for key in ("jump_magnitude", "physics.jump_magnitude"):
+            if key in flat:
+                self.JUMP_MAGNITUDE = float(flat[key])
+        for key in ("volatility_floor", "physics.volatility_floor"):
+            if key in flat:
+                self.VOLATILITY_FLOOR = float(flat[key])
+
+        # Regime-specific parameters
+        regime_map = {
+            "trending": MarketRegime.TRENDING,
+            "ranging": MarketRegime.RANGING,
+            "volatile": MarketRegime.VOLATILE,
+        }
+        for regime_name, regime_enum in regime_map.items():
+            prefix = f"regime_params.{regime_name}"
+            rp = self.REGIME_PARAMS.get(regime_enum)
+            if rp is None:
+                continue
+            for field_name in [
+                "funding_strength", "imbalance_strength", "momentum_decay",
+                "volatility_base", "jump_intensity", "mean_reversion", "drag_coefficient"
+            ]:
+                for key in (f"{prefix}.{field_name}", f"regime_params_{regime_name}_{field_name}"):
+                    if key in flat:
+                        setattr(rp, field_name, float(flat[key]))
 
     def detect_market_regime(
         self,
@@ -331,7 +379,7 @@ class QuantumPriceEngine:
                 else:
                     net_force -= force
 
-        return np.tanh(net_force) * 0.01  # Clamp to prevent explosions
+        return np.tanh(net_force) * 0.05  # Clamp - allow up to 5% drift from order book
 
     def calculate_spring_force(
         self,
@@ -348,10 +396,10 @@ class QuantumPriceEngine:
         """
         displacement = (current_price - equilibrium_price) / equilibrium_price
         # Cap displacement effect to prevent extreme forces
-        displacement = np.clip(displacement, -0.05, 0.05)
+        displacement = np.clip(displacement, -0.10, 0.10)
         force = -self.SPRING_K * displacement * params.mean_reversion
-        # Additional cap on force magnitude
-        return np.clip(force, -0.01, 0.01)
+        # Cap force magnitude - allow up to 3% from mean reversion
+        return np.clip(force, -0.03, 0.03)
 
     def calculate_liquidation_force(
         self,
@@ -381,7 +429,7 @@ class QuantumPriceEngine:
                 attraction = np.sign(distance_pct) * liq_volume * 1e-5
                 net_force += attraction
 
-        return np.clip(net_force, -0.01, 0.01)
+        return np.clip(net_force, -0.05, 0.05)
 
     def calculate_momentum_force(
         self,
@@ -482,8 +530,11 @@ class QuantumPriceEngine:
             # Update prices
             paths[:, step + 1] = paths[:, step] * np.exp(total_log_return)
 
-            # Cap extreme movements (15% max per minute)
-            max_move = 0.15
+            # Cap extreme per-step movements - scale with sqrt(dt) for consistency.
+            # For dt=1/60 (1-minute steps), this gives ~3.9% per step max,
+            # allowing realistic 1-hour cumulative moves up to ~30%.
+            max_move = 0.03 * np.sqrt(1.0 / dt)  # ~3% * sqrt(60) ≈ 23% hourly
+            max_move = min(max_move, 0.05)  # Per-step cap at 5%
             price_change = (paths[:, step + 1] - paths[:, step]) / paths[:, step]
             extreme_mask = np.abs(price_change) > max_move
             if np.any(extreme_mask):

@@ -56,6 +56,27 @@ HPARAM_KEY_MAP: Dict[str, str] = {
     # These map directly (no change needed, but explicit for documentation)
     "forecast.sigma_scale": "forecast.sigma_scale",
     "domains.domains.D0.n_trades": "domains.domains.D0.n_trades",
+
+    # --- Manifold parameters (PriceTimeManifold) ---
+    "manifold.price_resolution": "manifold.price_resolution",
+    "manifold.decay_rate": "manifold.decay_rate",
+    "manifold.sigma_supply": "manifold.sigma_supply",
+    "manifold.sigma_demand": "manifold.sigma_demand",
+    "manifold.df_supply": "manifold.df_supply",
+    "manifold.df_demand": "manifold.df_demand",
+
+    # --- Physics parameters (QuantumPriceEngine) ---
+    "physics.gravity_g": "physics.gravity_g",
+    "physics.spring_k": "physics.spring_k",
+    "physics.jump_magnitude": "physics.jump_magnitude",
+    "physics.volatility_floor": "physics.volatility_floor",
+
+    # --- Regime detector thresholds (KPCOFGSClassifier) ---
+    "regimes.temperature": "regimes.temperature",
+    "regimes.k_trending_mult": "regimes.k_trending_mult",
+    "regimes.k_mr_mult": "regimes.k_mr_mult",
+    "regimes.p_expand_mult": "regimes.p_expand_mult",
+    "regimes.p_contract_mult": "regimes.p_contract_mult",
 }
 
 
@@ -107,9 +128,18 @@ class FeatureCacheManager:
         Returns:
             features_df with all features and future_return target
         """
-        if n_trades in self._cache:
+        # Cache key must include regime params that affect feature computation,
+        # not just n_trades. Otherwise regime threshold changes use stale features.
+        regime_key_parts = [
+            str(regimes_config.get("temperature", 2.0)),
+            str(regimes_config.get("k_trending_mult", 1.5)),
+            str(regimes_config.get("k_mr_mult", 0.5)),
+        ]
+        cache_key = (n_trades, tuple(regime_key_parts))
+
+        if cache_key in self._cache:
             self._hits += 1
-            return self._cache[n_trades].copy()
+            return self._cache[cache_key].copy()
 
         self._misses += 1
 
@@ -150,8 +180,8 @@ class FeatureCacheManager:
             drop=True
         )
 
-        # Cache the result
-        self._cache[n_trades] = features_df.copy()
+        # Cache the result (keyed by n_trades + regime params)
+        self._cache[cache_key] = features_df.copy()
 
         return features_df
 
@@ -417,8 +447,8 @@ class RalphLoop:
     ) -> pd.DataFrame:
         """Get features_df for a candidate, using cache for structural params.
 
-        If the candidate includes D0.n_trades override and prints_df is available,
-        recompute features using the cache. Otherwise, return base_features_df.
+        Recomputes features when the candidate changes n_trades or regime
+        classifier parameters (temperature, k_trending_mult, etc.).
 
         Args:
             candidate: HparamCandidate with params
@@ -428,31 +458,50 @@ class RalphLoop:
         Returns:
             features_df appropriate for this candidate
         """
-        # Check if candidate has n_trades override
-        n_trades_key = "domains.domains.D0.n_trades"
-        if n_trades_key not in candidate.params:
+        # Check if candidate changes anything that affects feature computation
+        structural_keys = {"domains.domains.D0.n_trades"}
+        regime_keys = {
+            "regimes.temperature", "regimes.k_trending_mult",
+            "regimes.k_mr_mult", "regimes.p_expand_mult", "regimes.p_contract_mult",
+        }
+        changed_keys = set(candidate.params.keys()) & (structural_keys | regime_keys)
+
+        if not changed_keys:
             return base_features_df
 
-        n_trades = int(candidate.params[n_trades_key])
+        # Build modified regimes_config from candidate params
+        modified_regimes = copy.deepcopy(regimes_config)
+        for key in regime_keys:
+            if key in candidate.params:
+                # Strip "regimes." prefix for the config dict key
+                short_key = key.replace("regimes.", "")
+                modified_regimes[short_key] = candidate.params[key]
+
+        n_trades_key = "domains.domains.D0.n_trades"
+        n_trades = int(candidate.params.get(n_trades_key,
+            self.base_config.get("domains", {})
+            .get("domains", {})
+            .get("D0", {})
+            .get("n_trades", 200)
+        ))
 
         # Check if we can use cached/recomputed features
         if self.prints_df is None:
-            # Fall back to base features if prints_df not provided
             return base_features_df
 
-        # Get default n_trades from base config
+        # Check if anything actually changed from defaults
         default_n_trades = (
             self.base_config.get("domains", {})
             .get("domains", {})
             .get("D0", {})
             .get("n_trades", 200)
         )
+        has_regime_change = any(k in candidate.params for k in regime_keys)
 
-        if n_trades == default_n_trades:
-            # No change needed, use base features
+        if n_trades == default_n_trades and not has_regime_change:
             return base_features_df
 
-        # Use cache to get features for this n_trades value
+        # Use cache to get features for this n_trades + regime config
         domain_config = self.base_config.get(
             "domains", {"domains": {"D0": {"n_trades": 200}}}
         )
@@ -463,7 +512,7 @@ class RalphLoop:
             prints_df=self.prints_df,
             n_trades=n_trades,
             domain_config=domain_config,
-            regimes_config=regimes_config,
+            regimes_config=modified_regimes,
             models_config=models_config,
             horizon_bars=horizon_bars,
         )
