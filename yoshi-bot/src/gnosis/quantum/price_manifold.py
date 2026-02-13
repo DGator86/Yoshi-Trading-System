@@ -8,7 +8,7 @@ Models price as a quantum particle in the price-time manifold where:
 This is timescale-agnostic - works from 1m bars to daily bars.
 """
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import Any, List, Dict
 
 import numpy as np
 import pandas as pd
@@ -69,6 +69,66 @@ class PriceTimeManifold:
 
         self._states: List[WavefunctionState] = []
         self._manifold_points: List[ManifoldPoint] = []
+
+    @classmethod
+    def from_params(cls, params: Dict[str, Any]) -> "PriceTimeManifold":
+        """Create a PriceTimeManifold from a Ralph params dict.
+
+        Supports both flat keys (manifold.sigma_supply) and nested dicts.
+        Falls back to defaults for any missing key.
+        """
+        flat: Dict[str, Any] = {}
+        for k, v in params.items():
+            if isinstance(v, dict):
+                for k2, v2 in v.items():
+                    flat[f"{k}.{k2}"] = v2
+            else:
+                flat[k] = v
+
+        def _get(key: str, default):
+            for prefix in ("manifold.", ""):
+                full = f"{prefix}{key}"
+                if full in flat:
+                    return type(default)(flat[full])
+            return default
+
+        return cls(
+            price_resolution=_get("price_resolution", 173),
+            decay_rate=_get("decay_rate", 0.656),
+            sigma_supply=_get("sigma_supply", 0.018),
+            sigma_demand=_get("sigma_demand", 0.016),
+            df_supply=_get("df_supply", 4.0),
+            df_demand=_get("df_demand", 4.0),
+        )
+
+    def apply_params(self, params: Dict[str, Any]) -> None:
+        """Update manifold parameters in-place from a Ralph params dict."""
+        flat: Dict[str, Any] = {}
+        for k, v in params.items():
+            if isinstance(v, dict):
+                for k2, v2 in v.items():
+                    flat[f"{k}.{k2}"] = v2
+            else:
+                flat[k] = v
+
+        for key in ("manifold.price_resolution", "price_resolution"):
+            if key in flat:
+                self.price_resolution = int(flat[key])
+        for key in ("manifold.decay_rate", "decay_rate"):
+            if key in flat:
+                self.decay_rate = float(flat[key])
+        for key in ("manifold.sigma_supply", "sigma_supply"):
+            if key in flat:
+                self.sigma_supply = float(flat[key])
+        for key in ("manifold.sigma_demand", "sigma_demand"):
+            if key in flat:
+                self.sigma_demand = float(flat[key])
+        for key in ("manifold.df_supply", "df_supply"):
+            if key in flat:
+                self.df_supply = float(flat[key])
+        for key in ("manifold.df_demand", "df_demand"):
+            if key in flat:
+                self.df_demand = float(flat[key])
 
     def fit_from_1m_bars(self, ohlcv_df: pd.DataFrame) -> "PriceTimeManifold":
         """Construct manifold from 1-minute OHLCV bars.

@@ -11,17 +11,23 @@ ralph_loop:
     mae: 1.0
     abstention: 0.5
 
-  # Phase F: Reduced grid to stay under 40 combos (2*2*8 = 32)
-  # Focus on sigma_scale exploration which is critical for coverage target
+  # Grid expanded to include manifold, physics, and regime params.
+  # Total combos: 2 * 2 * 4 * 2 * 2 * 2 = 128 (manageable with caching)
   grid:
     # Structural knob: D0 aggregation size (with caching)
     domains.domains.D0.n_trades: [100, 200]
 
-    # Abstain threshold (mapped to regimes.constraints_by_species.default.confidence_floor)
-    regimes.confidence_floor: [0.50, 0.60]
+    # Abstain threshold
+    regimes.confidence_floor: [0.50, 0.65]
 
-    # Interval scaling - EXPANDED to reach 90% coverage target
-    forecast.sigma_scale: [1.0, 2.0, 3.5, 5.0, 7.5, 10.0, 15.0, 20.0]
+    # Interval scaling (reduced to keep grid manageable)
+    forecast.sigma_scale: [1.0, 3.0, 7.0, 15.0]
 
-    # NOTE: models.predictor.sigma_floor is reserved for future use
-    # (not currently implemented in QuantilePredictor)
+    # Manifold: Student-t degrees of freedom (lower = fatter tails)
+    manifold.df_supply: [3.0, 5.0]
+
+    # Physics: order book gravity strength
+    physics.gravity_g: [0.00001, 0.0001]
+
+    # Regime: trending threshold multiplier
+    regimes.k_trending_mult: [1.2, 1.8]

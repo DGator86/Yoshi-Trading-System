@@ -15,6 +15,10 @@ Outputs probabilistic forecasts with confidence intervals.
 
 All steering field parameters are exposed as hyperparameters for ML tuning.
 """
+import json
+import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
@@ -158,51 +162,94 @@ class QuantumPriceEngine:
         if random_seed is not None:
             np.random.seed(random_seed)
 
-        # Hot-reload state
-        self.param_store_path = "/root/Yoshi-Bot/config/params.json"
+        # Hot-reload state - check multiple paths for params.json
+        self.param_store_path = "config/params.json"
+        for candidate_path in [
+            "config/params.json",
+            "/root/Yoshi-Bot/config/params.json",
+            str(Path(__file__).resolve().parents[3] / "config" / "params.json"),
+        ]:
+            if os.path.exists(candidate_path):
+                self.param_store_path = candidate_path
+                break
         self._last_param_version = 0
         self._reload_every_n_cycles = 10
         self._cycle_count = 0
 
-    def maybe_reload_params(self):
-        """Check if Ralph has published new params. Non-blocking."""
+    def maybe_reload_params(self) -> Dict[str, Any]:
+        """Check if Ralph has published new params. Non-blocking.
+
+        Returns the full params dict if reloaded, empty dict otherwise.
+        Other engines (PriceTimeManifold, KPCOFGSClassifier) can use
+        the returned dict to update their own parameters.
+        """
         self._cycle_count += 1
         if self._cycle_count % self._reload_every_n_cycles != 0:
-            return
-        
+            return {}
+
         try:
-            import json
-            import os
             if not os.path.exists(self.param_store_path):
-                # Try local path if root path fails (for dev)
-                local_path = "config/params.json"
-                if os.path.exists(local_path):
-                    self.param_store_path = local_path
-                else:
-                    return
+                return {}
 
             with open(self.param_store_path, "r") as f:
                 store = json.load(f)
-            
+
             if store.get("version", 0) > self._last_param_version:
-                self._apply_params(store.get("params", {}))
+                params = store.get("params", {})
+                self._apply_params(params)
                 self._last_param_version = store["version"]
-                # Use print or logger
                 print(f"Hot-reloaded params v{self._last_param_version} from Ralph")
+                return params
         except Exception:
             pass
+        return {}
             
     def _apply_params(self, params: Dict[str, Any]):
-        """Update physics constants."""
-        # Update class constants if present
-        if "gravity_g" in params: self.GRAVITY_G = params["gravity_g"]
-        if "spring_k" in params: self.SPRING_K = params["spring_k"]
-        if "jump_magnitude" in params: self.JUMP_MAGNITUDE = params["jump_magnitude"]
-        
-        # Update regime params if structure matches
-        if "regime_params" in params:
-            # logic to update REGIME_PARAMS
-            pass
+        """Update physics constants and regime parameters from Ralph's optimized values.
+
+        Supports both flat keys (physics.gravity_g) and nested dict structures.
+        """
+        # Flatten nested dicts: {"physics": {"gravity_g": 1e-5}} -> {"physics.gravity_g": 1e-5}
+        flat = {}
+        for k, v in params.items():
+            if isinstance(v, dict):
+                for k2, v2 in v.items():
+                    flat[f"{k}.{k2}"] = v2
+            else:
+                flat[k] = v
+
+        # Physics constants
+        for key in ("gravity_g", "physics.gravity_g"):
+            if key in flat:
+                self.GRAVITY_G = float(flat[key])
+        for key in ("spring_k", "physics.spring_k"):
+            if key in flat:
+                self.SPRING_K = float(flat[key])
+        for key in ("jump_magnitude", "physics.jump_magnitude"):
+            if key in flat:
+                self.JUMP_MAGNITUDE = float(flat[key])
+        for key in ("volatility_floor", "physics.volatility_floor"):
+            if key in flat:
+                self.VOLATILITY_FLOOR = float(flat[key])
+
+        # Regime-specific parameters
+        regime_map = {
+            "trending": MarketRegime.TRENDING,
+            "ranging": MarketRegime.RANGING,
+            "volatile": MarketRegime.VOLATILE,
+        }
+        for regime_name, regime_enum in regime_map.items():
+            prefix = f"regime_params.{regime_name}"
+            rp = self.REGIME_PARAMS.get(regime_enum)
+            if rp is None:
+                continue
+            for field_name in [
+                "funding_strength", "imbalance_strength", "momentum_decay",
+                "volatility_base", "jump_intensity", "mean_reversion", "drag_coefficient"
+            ]:
+                for key in (f"{prefix}.{field_name}", f"regime_params_{regime_name}_{field_name}"):
+                    if key in flat:
+                        setattr(rp, field_name, float(flat[key]))
 
     def detect_market_regime(
         self,

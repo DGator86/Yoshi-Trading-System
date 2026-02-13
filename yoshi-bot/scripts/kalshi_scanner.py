@@ -81,7 +81,7 @@ def format_kalshi_report(opportunities):
     return "\n".join(lines)
 
 
-def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
+def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None, ralph_params=None):
     """Perform a single scan for opportunities using live Kalshi data."""
 
     if live_ohlcv is not None:
@@ -211,7 +211,11 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
             if len(tf_df) < 3:
                 continue
 
-            manifold = PriceTimeManifold()
+            # Use Ralph-optimized params if available, otherwise defaults
+            if ralph_params:
+                manifold = PriceTimeManifold.from_params(ralph_params)
+            else:
+                manifold = PriceTimeManifold()
             manifold.fit_from_1m_bars(tf_df)
 
             h_bars = max(1, 60 // tf)
@@ -318,8 +322,9 @@ async def main():
     while True:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning...")
         
-        # Task 4: Check for Ralph updates
-        quantum_engine.maybe_reload_params()
+        # Task 4: Check for Ralph updates. Capture returned params for
+        # other engines (PriceTimeManifold, etc.) that need them.
+        ralph_params = quantum_engine.maybe_reload_params()
 
         live_data = None
         if args.live:
@@ -359,12 +364,13 @@ async def main():
             else:
                 print("Live mode disabled. Using local parquet.")
 
-        # Run Scan
+        # Run Scan with Ralph's optimized parameters
         opps = run_scan(
             args.symbol,
             data_path if not args.live or live_data is None else None,
             args.threshold,
-            live_ohlcv=live_data
+            live_ohlcv=live_data,
+            ralph_params=ralph_params if ralph_params else None,
         )
         
         if opps:

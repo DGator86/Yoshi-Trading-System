@@ -15,3 +15,19 @@ predictor:
 kpcofgs:
   type: "rules_then_calibrated"
   calibration: "isotonic"
+
+# PriceTimeManifold parameters (tunable by Ralph)
+manifold:
+  price_resolution: 173
+  decay_rate: 0.656
+  sigma_supply: 0.018
+  sigma_demand: 0.016
+  df_supply: 4.0
+  df_demand: 4.0
+
+# QuantumPriceEngine physics constants (tunable by Ralph)
+physics:
+  gravity_g: 0.00001
+  spring_k: 0.3
+  jump_magnitude: 0.02
+  volatility_floor: 0.015
