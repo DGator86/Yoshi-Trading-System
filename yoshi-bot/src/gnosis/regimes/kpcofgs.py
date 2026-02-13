@@ -64,7 +64,15 @@ class KPCOFGSClassifier:
         ]
 
         # Temperature for softmax (lower = sharper distributions)
-        self.temperature = 2.0
+        # Configurable from regimes_config for tuning
+        self.temperature = regimes_config.get("temperature", 2.0)
+
+        # Adaptive threshold multipliers (configurable via Ralph optimization)
+        # These replace the hardcoded 1.5x and 0.5x thresholds
+        self.k_trending_mult = regimes_config.get("k_trending_mult", 1.5)
+        self.k_mr_mult = regimes_config.get("k_mr_mult", 0.5)
+        self.p_expand_mult = regimes_config.get("p_expand_mult", 1.2)
+        self.p_contract_mult = regimes_config.get("p_contract_mult", 0.8)
 
     def _classify_K(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """Classify K-level (Kinetics) with probabilities.
@@ -79,18 +87,18 @@ class KPCOFGSClassifier:
         vol = np.where(vol <= 0, 0.01, vol)  # Ensure positive
 
         # Compute logits based on distance from decision boundaries
-        # K_TRENDING: |returns| > vol * 1.5
-        # K_MEAN_REVERTING: |returns| < vol * 0.5
+        # K_TRENDING: |returns| > vol * k_trending_mult (configurable, default 1.5)
+        # K_MEAN_REVERTING: |returns| < vol * k_mr_mult (configurable, default 0.5)
         # K_BALANCED: otherwise
 
         logits = np.zeros((n, 3))
 
-        # Trending score: how much |returns| exceeds vol * 1.5
-        trending_score = _safe_divide(returns_abs - vol * 1.5, vol)
+        # Trending score: how much |returns| exceeds vol * threshold
+        trending_score = _safe_divide(returns_abs - vol * self.k_trending_mult, vol)
         logits[:, 0] = trending_score * self.temperature
 
-        # Mean-reverting score: how much vol * 0.5 exceeds |returns|
-        mr_score = _safe_divide(vol * 0.5 - returns_abs, vol)
+        # Mean-reverting score: how much threshold exceeds |returns|
+        mr_score = _safe_divide(vol * self.k_mr_mult - returns_abs, vol)
         logits[:, 1] = mr_score * self.temperature
 
         # Balanced: base case (neutral logit)
@@ -114,12 +122,12 @@ class KPCOFGSClassifier:
 
         logits = np.zeros((n, 3))
 
-        # Vol expanding: vol > vol_prev * 1.2
-        expanding_score = _safe_divide(vol - vol_prev * 1.2, vol_prev)
+        # Vol expanding: vol > vol_prev * p_expand_mult (configurable, default 1.2)
+        expanding_score = _safe_divide(vol - vol_prev * self.p_expand_mult, vol_prev)
         logits[:, 0] = expanding_score * self.temperature
 
-        # Vol contracting: vol < vol_prev * 0.8
-        contracting_score = _safe_divide(vol_prev * 0.8 - vol, vol_prev)
+        # Vol contracting: vol < vol_prev * p_contract_mult (configurable, default 0.8)
+        contracting_score = _safe_divide(vol_prev * self.p_contract_mult - vol, vol_prev)
         logits[:, 1] = contracting_score * self.temperature
 
         # Stable: base case

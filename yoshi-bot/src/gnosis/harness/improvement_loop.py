@@ -206,12 +206,54 @@ class YoshiImprovementLoop:
 
         return new_metrics, improvement, should_accept
 
+    def _random_config(self, base_config: Dict) -> Dict:
+        """Generate a random config by sampling each variable from its candidates."""
+        config = copy.deepcopy(base_config)
+        for var_name, variable in self.variables.items():
+            candidates = variable.candidates
+            if candidates:
+                random_val = candidates[np.random.randint(len(candidates))]
+                config = self._set_config_value(config, variable.path, random_val)
+        return config
+
+    def _try_multi_perturbation(
+        self,
+        variables_to_perturb: List[Tuple[str, Any]],
+        target: MetricTarget,
+    ) -> Tuple[Dict[str, float], float, bool]:
+        """Try changing multiple variables at once.
+
+        Args:
+            variables_to_perturb: List of (variable_name, new_value) pairs
+            target: The metric target to optimize
+
+        Returns:
+            (new_metrics, improvement, should_accept)
+        """
+        new_config = copy.deepcopy(self._current_config)
+        for var_name, new_value in variables_to_perturb:
+            variable = self.variables[var_name]
+            new_config = self._set_config_value(new_config, variable.path, new_value)
+
+        new_metrics = self._evaluate(new_config)
+
+        old_value = self._current_metrics.get(target.metric_type.value, 0)
+        new_metric_value = new_metrics.get(target.metric_type.value, 0)
+        improvement = target.improvement(old_value, new_metric_value)
+
+        return new_metrics, improvement, improvement > 0
+
     def _optimize_for_target(
         self,
         target: MetricTarget,
         config: Dict,
     ) -> LoopResult:
         """Optimize until target is met or give up.
+
+        Enhanced strategy:
+        1. Standard coordinate descent (try each variable one at a time)
+        2. Random pair perturbations (try 2 variables together to find interactions)
+        3. Random restarts when stuck (escape local optima)
 
         Args:
             target: The metric target to achieve
@@ -244,15 +286,22 @@ class YoshiImprovementLoop:
                 final_config=self._current_config,
             )
 
+        # Track the global best across restarts
+        global_best_config = copy.deepcopy(self._current_config)
+        global_best_metrics = copy.deepcopy(self._current_metrics)
+        global_best_value = current_value
+
         start_time = time.time()
         iteration_history: List[IterationResult] = []
         iterations_without_improvement = 0
         improvements_made = 0
+        n_restarts = 0
+        max_restarts = 3  # Allow up to 3 random restarts
 
         for iteration in range(1, self.max_iterations_per_target + 1):
             iter_start = time.time()
 
-            # Try each variable
+            # Try each variable (standard coordinate descent)
             best_improvement = 0
             best_variable = None
             best_new_value = None
@@ -270,6 +319,31 @@ class YoshiImprovementLoop:
                         best_new_value = new_value
                         best_new_metrics = new_metrics
 
+            # If single-variable search stalled, try random pair perturbations
+            if best_improvement <= 0 and len(self.variables) >= 2:
+                var_names = list(self.variables.keys())
+                for _ in range(min(10, len(var_names) * 2)):
+                    # Pick 2 random variables
+                    pair = np.random.choice(var_names, size=2, replace=False)
+                    perturbations = []
+                    for vn in pair:
+                        v = self.variables[vn]
+                        cands = v.get_perturbations()
+                        if cands:
+                            perturbations.append((vn, cands[np.random.randint(len(cands))]))
+
+                    if len(perturbations) == 2:
+                        new_metrics, improvement, _ = self._try_multi_perturbation(
+                            perturbations, target
+                        )
+                        if improvement > best_improvement:
+                            best_improvement = improvement
+                            best_variable = self.variables[perturbations[0][0]]
+                            best_new_value = f"multi:{perturbations}"
+                            best_new_metrics = new_metrics
+                            # Store for applying below
+                            best_multi_perturbations = perturbations
+
             # Record iteration
             iter_result = IterationResult(
                 iteration=iteration,
@@ -286,12 +360,20 @@ class YoshiImprovementLoop:
 
             if best_improvement > 0:
                 # Accept the change
-                self._current_config = self._set_config_value(
-                    self._current_config, best_variable.path, best_new_value
-                )
-                self._current_metrics = best_new_metrics
-                best_variable.current_value = best_new_value
+                if isinstance(best_new_value, str) and best_new_value.startswith("multi:"):
+                    # Apply multi-variable perturbation
+                    for vn, val in best_multi_perturbations:
+                        self._current_config = self._set_config_value(
+                            self._current_config, self.variables[vn].path, val
+                        )
+                        self.variables[vn].current_value = val
+                else:
+                    self._current_config = self._set_config_value(
+                        self._current_config, best_variable.path, best_new_value
+                    )
+                    best_variable.current_value = best_new_value
 
+                self._current_metrics = best_new_metrics
                 current_value = self._current_metrics.get(target.metric_type.value, 0)
                 improvements_made += 1
                 iterations_without_improvement = 0
@@ -299,9 +381,15 @@ class YoshiImprovementLoop:
                 self._log(f"  [{iteration}] {best_variable.name}: {iter_result.old_value} -> {best_new_value}")
                 self._log(f"       {target.metric_type.value}: {current_value:.4f} (+{best_improvement:.4f})")
 
+                # Track global best
+                if target.improvement(global_best_value, current_value) > 0:
+                    global_best_config = copy.deepcopy(self._current_config)
+                    global_best_metrics = copy.deepcopy(self._current_metrics)
+                    global_best_value = current_value
+
                 # Check if target achieved
                 if target.is_satisfied(current_value):
-                    self._log(f"\n✓ TARGET ACHIEVED at iteration {iteration}!")
+                    self._log(f"\n  TARGET ACHIEVED at iteration {iteration}!")
                     return LoopResult(
                         target_name=target.name,
                         target_achieved=True,
@@ -317,22 +405,39 @@ class YoshiImprovementLoop:
                 iterations_without_improvement += 1
                 self._log(f"  [{iteration}] No improvement found")
 
-                # Check patience
+                # Check patience - but try random restart first
                 if iterations_without_improvement >= self.patience:
-                    self._log(f"\n✗ No improvement for {self.patience} iterations, stopping")
-                    break
+                    if n_restarts < max_restarts:
+                        n_restarts += 1
+                        self._log(f"\n  Random restart {n_restarts}/{max_restarts}...")
+                        self._current_config = self._random_config(config)
+                        self._current_metrics = self._evaluate(self._current_config)
+                        current_value = self._current_metrics.get(target.metric_type.value, 0)
+                        iterations_without_improvement = 0
 
-        current_value = self._current_metrics.get(target.metric_type.value, 0)
+                        # Check if random config is better than global best
+                        if target.improvement(global_best_value, current_value) > 0:
+                            global_best_config = copy.deepcopy(self._current_config)
+                            global_best_metrics = copy.deepcopy(self._current_metrics)
+                            global_best_value = current_value
+
+                        self._log(f"  Restart value: {current_value:.4f} (global best: {global_best_value:.4f})")
+                    else:
+                        self._log(f"\n  No improvement for {self.patience} iterations and all restarts exhausted, stopping")
+                        break
+
+        # Return the global best found across all restarts
+        final_value = global_best_metrics.get(target.metric_type.value, 0)
         return LoopResult(
             target_name=target.name,
-            target_achieved=False,
-            final_value=current_value,
+            target_achieved=target.is_satisfied(final_value),
+            final_value=final_value,
             target_value=target.target_value,
             iterations=len(iteration_history),
             improvements_made=improvements_made,
             total_duration_seconds=time.time() - start_time,
             iteration_history=iteration_history,
-            final_config=copy.deepcopy(self._current_config),
+            final_config=copy.deepcopy(global_best_config),
         )
 
     def run(self, initial_config: Dict) -> List[LoopResult]:
@@ -473,6 +578,27 @@ def get_regime_variables() -> List[Variable]:
             path="regimes.confidence_floor",
             current_value=0.65,
             candidates=[0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="regime_temperature",
+            path="regimes.temperature",
+            current_value=2.0,
+            candidates=[0.5, 1.0, 1.5, 2.0, 3.0, 5.0],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="k_trending_mult",
+            path="regimes.k_trending_mult",
+            current_value=1.5,
+            candidates=[1.0, 1.2, 1.5, 2.0, 2.5],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="k_mr_mult",
+            path="regimes.k_mr_mult",
+            current_value=0.5,
+            candidates=[0.3, 0.4, 0.5, 0.7, 0.8],
             variable_type="continuous",
         ),
     ]
@@ -657,6 +783,88 @@ def get_steering_field_variables() -> List[Variable]:
     return variables
 
 
+def get_manifold_variables() -> List[Variable]:
+    """Get tunable variables for the Price-Time Manifold."""
+    return [
+        Variable(
+            name="manifold_price_resolution",
+            path="manifold.price_resolution",
+            current_value=173,
+            candidates=[100, 150, 173, 200, 250],
+            variable_type="discrete",
+        ),
+        Variable(
+            name="manifold_decay_rate",
+            path="manifold.decay_rate",
+            current_value=0.656,
+            candidates=[0.3, 0.5, 0.656, 0.8, 0.9],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="manifold_sigma_supply",
+            path="manifold.sigma_supply",
+            current_value=0.018,
+            candidates=[0.010, 0.014, 0.018, 0.024, 0.030],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="manifold_sigma_demand",
+            path="manifold.sigma_demand",
+            current_value=0.016,
+            candidates=[0.010, 0.013, 0.016, 0.020, 0.025],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="manifold_df_supply",
+            path="manifold.df_supply",
+            current_value=4.0,
+            candidates=[3.0, 4.0, 5.0, 7.0, 10.0],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="manifold_df_demand",
+            path="manifold.df_demand",
+            current_value=4.0,
+            candidates=[3.0, 4.0, 5.0, 7.0, 10.0],
+            variable_type="continuous",
+        ),
+    ]
+
+
+def get_physics_variables() -> List[Variable]:
+    """Get tunable variables for the Quantum Price Engine physics constants."""
+    return [
+        Variable(
+            name="gravity_g",
+            path="physics.gravity_g",
+            current_value=1e-5,
+            candidates=[1e-7, 1e-6, 1e-5, 1e-4, 1e-3],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="spring_k",
+            path="physics.spring_k",
+            current_value=0.3,
+            candidates=[0.1, 0.2, 0.3, 0.5, 0.8],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="jump_magnitude",
+            path="physics.jump_magnitude",
+            current_value=0.02,
+            candidates=[0.01, 0.015, 0.02, 0.03, 0.04],
+            variable_type="continuous",
+        ),
+        Variable(
+            name="volatility_floor",
+            path="physics.volatility_floor",
+            current_value=0.015,
+            candidates=[0.008, 0.012, 0.015, 0.020, 0.025],
+            variable_type="continuous",
+        ),
+    ]
+
+
 def get_all_variables() -> List[Variable]:
     """Get all tunable variables."""
     return (
@@ -664,7 +872,9 @@ def get_all_variables() -> List[Variable]:
         get_domain_variables() +
         get_regime_variables() +
         get_particle_variables() +
-        get_steering_field_variables()
+        get_steering_field_variables() +
+        get_manifold_variables() +
+        get_physics_variables()
     )
 
 

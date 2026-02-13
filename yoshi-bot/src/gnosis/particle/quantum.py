@@ -135,10 +135,11 @@ class QuantumPriceEngine:
     }
 
     # Physics constants
-    GRAVITY_G = 1e-8          # Order book gravitational constant (reduced)
-    SPRING_K = 0.5            # VWAP mean reversion strength (much weaker)
-    JUMP_MAGNITUDE = 0.015    # Average jump size (1.5%)
-    VOLATILITY_FLOOR = 0.02   # Minimum hourly volatility (2%)
+    # Gravity was 1e-8 (negligible). Increased so order book actually matters.
+    GRAVITY_G = 1e-5          # Order book gravitational constant
+    SPRING_K = 0.3            # VWAP mean reversion strength (moderate)
+    JUMP_MAGNITUDE = 0.02     # Average jump size (2% - matches BTC hourly tails)
+    VOLATILITY_FLOOR = 0.015  # Minimum hourly volatility (1.5%)
 
     def __init__(
         self,
@@ -331,7 +332,7 @@ class QuantumPriceEngine:
                 else:
                     net_force -= force
 
-        return np.tanh(net_force) * 0.01  # Clamp to prevent explosions
+        return np.tanh(net_force) * 0.05  # Clamp - allow up to 5% drift from order book
 
     def calculate_spring_force(
         self,
@@ -348,10 +349,10 @@ class QuantumPriceEngine:
         """
         displacement = (current_price - equilibrium_price) / equilibrium_price
         # Cap displacement effect to prevent extreme forces
-        displacement = np.clip(displacement, -0.05, 0.05)
+        displacement = np.clip(displacement, -0.10, 0.10)
         force = -self.SPRING_K * displacement * params.mean_reversion
-        # Additional cap on force magnitude
-        return np.clip(force, -0.01, 0.01)
+        # Cap force magnitude - allow up to 3% from mean reversion
+        return np.clip(force, -0.03, 0.03)
 
     def calculate_liquidation_force(
         self,
@@ -381,7 +382,7 @@ class QuantumPriceEngine:
                 attraction = np.sign(distance_pct) * liq_volume * 1e-5
                 net_force += attraction
 
-        return np.clip(net_force, -0.01, 0.01)
+        return np.clip(net_force, -0.05, 0.05)
 
     def calculate_momentum_force(
         self,
@@ -482,8 +483,11 @@ class QuantumPriceEngine:
             # Update prices
             paths[:, step + 1] = paths[:, step] * np.exp(total_log_return)
 
-            # Cap extreme movements (15% max per minute)
-            max_move = 0.15
+            # Cap extreme per-step movements - scale with sqrt(dt) for consistency.
+            # For dt=1/60 (1-minute steps), this gives ~3.9% per step max,
+            # allowing realistic 1-hour cumulative moves up to ~30%.
+            max_move = 0.03 * np.sqrt(1.0 / dt)  # ~3% * sqrt(60) ≈ 23% hourly
+            max_move = min(max_move, 0.05)  # Per-step cap at 5%
             price_change = (paths[:, step + 1] - paths[:, step]) / paths[:, step]
             extreme_mask = np.abs(price_change) > max_move
             if np.any(extreme_mask):

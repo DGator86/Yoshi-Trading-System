@@ -27,6 +27,9 @@ from src.gnosis.particle.quantum import QuantumPriceEngine # For param hot-reloa
 from src.gnosis.utils.kalshi_client import KalshiClient  # noqa: E402
 import src.gnosis.utils.notifications as notify  # noqa: E402
 from src.gnosis.data.aggregator import DataSourceAggregator # Task 1
+from src.gnosis.forecasting.modular_ensemble import (
+    GatingInputs, GatingPolicyConfig, compute_module_weights
+)
 
 # Load environment variables
 load_dotenv()
@@ -67,6 +70,8 @@ def format_kalshi_report(opportunities):
         lines.append(f"Model Prob: {opp['model_prob']:.1%}")
         edge = opp['model_prob'] - opp['market_prob']
         lines.append(f"EDGE: {edge:+.1%}")
+        confidence = opp.get('confidence', 0.5)
+        lines.append(f"Confidence: {confidence:.0%}")
         action = ("BUY YES" if edge > 0.05 else "BUY NO"
                   if edge < -0.05 else "NEUTRAL")
         lines.append(f"ACTION: `{action}`")
@@ -143,6 +148,9 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
         return []
 
     timeframes = [5, 15, 30, 60]
+    # Horizon-appropriate weights: longer timeframes matter more for 1-hour
+    # predictions. 60m captures the full horizon directly, 5m is mostly noise.
+    tf_weights = {5: 0.10, 15: 0.20, 30: 0.30, 60: 0.40}
     opportunities = []
 
     # 2. Iterate through Kalshi strikes and find edges
@@ -181,7 +189,9 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
             continue
 
         agg_probs = []
+        agg_weights = []
         medians = []
+        median_weights = []
 
         for tf in timeframes:
             # Dynamically build aggregation dict based on available columns
@@ -198,24 +208,50 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
                 agg_dict
             ).dropna().reset_index()
 
+            if len(tf_df) < 3:
+                continue
+
             manifold = PriceTimeManifold()
-            # Note: Parameter hot-reload affects QuantumPriceEngine physics.
-            # PriceTimeManifold (wavefunction dynamics) might need separate linkage 
-            # if we want Ralph to optimize it too. For now, we assume QuantumPriceEngine 
-            # is the primary target for Ralph's optimization loop (physics params).
-            
             manifold.fit_from_1m_bars(tf_df)
 
             h_bars = max(1, 60 // tf)
-            res = manifold.predict_binary_market(strike, h_bars, n_sims=2000)
-            agg_probs.append(res['prob'])
-            medians.append(res['median'])
+            res = manifold.predict_binary_market(strike, h_bars, n_sims=3000)
 
-        final_prob = sum(agg_probs) / len(agg_probs)
-        final_median = sum(medians) / len(medians)
+            w = tf_weights.get(tf, 0.25)
+            agg_probs.append(res['prob'])
+            agg_weights.append(w)
+            medians.append(res['median'])
+            median_weights.append(w)
+
+        if not agg_probs:
+            continue
+
+        # Weighted average across timeframes
+        total_w = sum(agg_weights)
+        final_prob = sum(p * w for p, w in zip(agg_probs, agg_weights)) / total_w
+        final_median = sum(m * w for m, w in zip(medians, median_weights)) / total_w
         edge = final_prob - market_prob
 
-        if abs(edge) >= edge_threshold:
+        # Compute ensemble confidence to scale the edge threshold.
+        # Higher confidence = lower bar needed, lower confidence = stricter.
+        try:
+            gating_inputs = GatingInputs(
+                regime_probs={},  # Populated by regime detector if available
+                spread_bps=float(y_ask - y_bid) if y_ask > y_bid else 5.0,
+                depth_norm=0.5,  # Default medium liquidity
+                lfi=0.0,
+                jump_probability=0.0,
+            )
+            _, confidence = compute_module_weights(gating_inputs)
+        except Exception:
+            confidence = 0.5
+
+        # Scale edge threshold: confident predictions need less edge,
+        # uncertain predictions need more.
+        adjusted_threshold = edge_threshold * (1.5 - confidence)
+        adjusted_threshold = max(adjusted_threshold, 0.05)  # Floor at 5%
+
+        if abs(edge) >= adjusted_threshold:
             opportunities.append({
                 'symbol': symbol,
                 'current_p': current_p,
@@ -223,7 +259,9 @@ def run_scan(symbol, data_path=None, edge_threshold=0.10, live_ohlcv=None):
                 'market_prob': market_prob,
                 'model_prob': final_prob,
                 'strike': strike,
-                'ticker': market['ticker']
+                'ticker': market['ticker'],
+                'confidence': confidence,
+                'adjusted_threshold': adjusted_threshold,
             })
 
     return opportunities

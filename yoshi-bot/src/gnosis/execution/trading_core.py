@@ -59,6 +59,26 @@ class StatusResponse(BaseModel):
 # --- State ---
 
 
+class RiskLimits:
+    """Risk management limits for position sizing and exposure control."""
+
+    def __init__(
+        self,
+        max_position_count: int = 5,
+        max_contracts_per_position: int = 10,
+        max_total_contracts: int = 25,
+        max_daily_loss_cents: int = 5000,  # $50 max daily loss
+        min_edge_threshold: float = 0.07,  # 7% minimum edge to trade
+        max_correlated_positions: int = 3,  # Max same-direction on same symbol
+    ):
+        self.max_position_count = max_position_count
+        self.max_contracts_per_position = max_contracts_per_position
+        self.max_total_contracts = max_total_contracts
+        self.max_daily_loss_cents = max_daily_loss_cents
+        self.min_edge_threshold = min_edge_threshold
+        self.max_correlated_positions = max_correlated_positions
+
+
 class TradingState:
     """In-memory store for trading system status, proposals and positions."""
 
@@ -69,9 +89,12 @@ class TradingState:
         self.positions: List[Dict] = []
         self.orders: List[Dict] = []
         self.start_time: datetime = datetime.now()
+        self.daily_pnl_cents: int = 0
+        self.last_pnl_reset: datetime = datetime.now()
 
 
 state = TradingState()
+risk = RiskLimits()
 kalshi = KalshiClient()
 
 
@@ -151,13 +174,48 @@ async def propose_trade(proposal: TradeProposal) -> Dict[str, Any]:
         logger.warning(msg)
         return {"success": False, "message": msg}
 
-    if abs(proposal.edge) < 0.05:
-        # Just log, don't execute if edge is too small (already filtered by scanner though)
-        msg = f"Proposal {prop_id} edge too small ({proposal.edge:.1%}). Skipping execution."
+    if abs(proposal.edge) < risk.min_edge_threshold:
+        msg = f"Proposal {prop_id} edge too small ({proposal.edge:.1%} < {risk.min_edge_threshold:.1%}). Skipping."
         logger.info(msg)
         return {"success": True, "message": msg}
 
-    # 2. Execution via Circuit Breaker
+    # 2. Risk checks
+    # Reset daily PnL if new day
+    now = datetime.now()
+    if now.date() != state.last_pnl_reset.date():
+        state.daily_pnl_cents = 0
+        state.last_pnl_reset = now
+
+    # Check daily loss limit
+    if state.daily_pnl_cents <= -risk.max_daily_loss_cents:
+        msg = f"Proposal {prop_id} REJECTED: daily loss limit reached ({state.daily_pnl_cents} cents)."
+        logger.warning(msg)
+        return {"success": False, "message": msg}
+
+    # Check max open positions
+    if len(state.positions) >= risk.max_position_count:
+        msg = f"Proposal {prop_id} REJECTED: max position count ({risk.max_position_count}) reached."
+        logger.warning(msg)
+        return {"success": False, "message": msg}
+
+    # Check total contract exposure
+    total_contracts = sum(p.get('count', 1) for p in state.positions)
+    if total_contracts >= risk.max_total_contracts:
+        msg = f"Proposal {prop_id} REJECTED: max total contracts ({risk.max_total_contracts}) reached."
+        logger.warning(msg)
+        return {"success": False, "message": msg}
+
+    # Check correlated positions (same symbol, same direction)
+    same_direction = [
+        p for p in state.positions
+        if p.get('symbol') == proposal.symbol and p.get('side') == ("yes" if "YES" in proposal.action.upper() else "no")
+    ]
+    if len(same_direction) >= risk.max_correlated_positions:
+        msg = f"Proposal {prop_id} REJECTED: max correlated positions ({risk.max_correlated_positions}) for {proposal.symbol}."
+        logger.warning(msg)
+        return {"success": False, "message": msg}
+
+    # 3. Execution via Circuit Breaker
     action = proposal.action.upper()
     side = "yes"
     if "NO" in action:
@@ -190,8 +248,13 @@ async def propose_trade(proposal: TradeProposal) -> Dict[str, Any]:
         )
 
         if order_result:
+            order_result['symbol'] = proposal.symbol
+            order_result['side'] = side
+            order_result['count'] = count
+            order_result['edge'] = proposal.edge
+            order_result['timestamp'] = datetime.now().isoformat()
             state.orders.append(order_result)
-            state.positions.append(order_result) # Track position
+            state.positions.append(order_result)
             msg = f"Executed {side.upper()} on {proposal.ticker} (Order ID: {order_result.get('order_id')})"
             logger.info(msg)
             return {
